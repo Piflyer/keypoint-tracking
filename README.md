@@ -3,17 +3,17 @@
 Predict and track keypoints of objects in real-time from a sequence of frames. You can use the tracked points with a solver, like the Quaternion solver, to estimate object poses from a single viewpoint.
 
 # Features:
-- MobileNetV3-based backbone for Keypoint R-CNN
+- MobileNetV3-based backbone for Keypoint R-CNN or YOLO v8 keypoint detector
 - Modified Keypoint R-CNN to include point visibility detection through Conformal Prediction
 - Lukas-Kanade optical flow for tracking points between inference
 - Pretrained weights for mugs and a collection of [YCB-V](https://www.ycbbenchmarks.com/object-models/) objects
 
 ### Limitations:
 - Currently, category-based tracking (ie: cannot distinguish different mugs from each other)
-- Kalman Filtering is disabled for the time being
 
 ### In the Works:
 - Release custom dataset and weights for other category level objects
+- Release YOLO v8 keypoint training script and models (In the process of transition from Keypoint R-CNN to YOLO)
 
 # Usage:
 
@@ -23,11 +23,12 @@ You can use one of the provided pre-trained models for Keypoint-RCNN or you can 
 We have provided the pre-trained weights for the Keypoint-RCNN model, which you can use for inference on your own images or video streams. To use the pre-trained model, simply load the weights and run inference as shown in the provided example scripts.
 
 - Mugs Pretrained Model
-- YCB-V Pretrained Model
+- LM-O Pretrained Model
 - Forks Pretrained Model [Coming Soon]
 - Pans Pretrained Model [Coming Soon]
 - NOCS Pretrained Model [Coming Soon]
-## Training Your Own Model
+
+## Training Your Own Model (Keypoint R-CNN or YOLOv8)
 
 To train your own model, you can use either the provided dataset or your own custom dataset. We use the COCO dataset format for object detection and keypoint annotations. You can annotate your own objects using our modified [Keypoint Picker Tool](https://github.com/lopenguin/point-picker-3d) and the generating synthetic data using our provided BlenderProc script.
 
@@ -82,7 +83,26 @@ Also on line 36, change to the folder path of target objects you want to include
 
 ```
 
+4) Make sure you download the necessary textures and place them in the appropriate directory.
+```bash
+blenderproc download cc_textures 
+```
+This will be your texture path.
+
+You can then generate data using BlenderProc as such:
+
+```bash
+blenderproc run generate-data.py <path/to/your/dataset> <path/to/textures> <path/to/output>  --num_scenes=2000
+```
 
 
-### Training
+> **NOTE:**  We recommend at least 50K images per category but you might need more depending on your specific use case/task.
 
+<details>
+<summary> ### Training (Keypoint R-CNN)</summary>
+
+```bash
+python train.py --dataset /path/to/your/dataset --backbone mobilenetv3 --num-epochs 50
+```
+
+</details>
