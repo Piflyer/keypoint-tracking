@@ -52,8 +52,8 @@ We have provided the pre-trained weights for the Keypoint-RCNN and YOLOv8 models
 
 | Model Name | Conformal Score | Number of Keypoints | Number of Classes (including background)
 |------------|------------------|---------------------|-----------------------------------------
-| Mugs Kpt-RCNN       | 0.0816              | 43                  | 2
-| LM-O Kpt-RCNN      | 0.0977              | 10                  | 9
+| [Mugs Kpt-RCNN](https://drive.google.com/file/d/13yPcl1W9-Bx3ABMyVy8zeVXqbC5OAcXM/view?usp=drive_link)       | 0.0816              | 43                  | 2
+| [LM-O Kpt-RCNN](https://drive.google.com/file/d/1dkbUunBnjm_-vnNOMIP0iiFz89L3q7eK/view?usp=drive_link)     | 0.0977              | 10                  | 9
 
 ### YOLO Models
 
@@ -106,7 +106,7 @@ python run_tracking.py \
 Or for a folder containing images using the pre-trained Keypoint R-CNN LM-O model:
 ``` bash
 python run_tracking.py \
-    --model_path "lm_o_kpt_rcnn.pt" \
+    --model_path "lm_o_kpt_rcnn.pth" \
     --dataset_path "images_folder" \
     --model_type "kpt_rcnn" \
     --num_classes 10 \
