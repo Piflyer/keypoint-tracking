@@ -89,7 +89,7 @@ python run_tracking.py
 
 ### Data Input Types:
 - `nocs`: NOCS (Normalized Object Coordinate Space) data format. This would be the NOCS folder containing images in `*_colors.png` format.
-- `bop`: BOP (Benchmarking Object Pose) data format. We have a custom dataloader for that, see how you can process your data here.
+- `bop`: BOP (Benchmarking Object Pose) data format. We have a custom dataloader for that, see how you can process your data [here](https://github.com/Piflyer/kpt-rcnn-tracking?tab=readme-ov-file#data-preparation).
 - `folder`: A folder containing images for tracking. This should be in numerical order with no gaps (e.g., `0001.png`, `0002.png`, ...).
 - `video`: A video file for tracking. This can be either a video file or an OpenCV camera index.
 
@@ -293,4 +293,45 @@ python keypoint-rccn-train.py \
 - `--checkpoint_path`: Path to the checkpoint file to continue training from.
 - `--checkpoint_tensorboard`: Path to the TensorBoard checkpoint directory to continue logging.
 
+</details>
+
+<details>
+<summary>
+<h2> Conformal Prediction for Keypoint Visibility (Keypoint R-CNN) </h2>
+</summary>
+
+After training your Keypoint R-CNN model, you can calculate conformal prediction thresholds to improve keypoint visibility detection. This script evaluates your trained model on validation data and computes a conformal threshold that provides statistical guarantees for keypoint visibility predictions.
+
+```bash
+python conformal-visibility.py \
+    --model_path \
+    --dataset \
+    --batch_size
+```
+
+### Core Arguments:
+
+- `--model_path`: Path to the trained Keypoint R-CNN model weights (.pth file).
+- `--dataset`: Path to the dataset directory containing val_labels.json for evaluation.
+- `--batch_size`: Batch size for evaluation. Default is 4.
+
+### Example Usage:
+
+For calculating conformal threshold for a mugs model:
+```bash
+python conformal-visibility.py \
+    --model_path "path/to/mugs_model.pth" \
+    --dataset "path/to/mugs_dataset/rcnn-processed" \
+    --batch_size 8
+```
+
+For calculating conformal threshold for an LM-O model:
+```bash
+python conformal-visibility.py \
+    --model_path "path/to/lmo_model.pth" \
+    --dataset "path/to/lmo_dataset/rcnn-processed" \
+    --batch_size 4
+```
+
+> **NOTE:** The script automatically detects the model architecture (num_classes=9, num_keypoints=10) but you may need to modify the main function parameters if your model has different specifications. The output conformal threshold can be used with the `--conformal_threshold` argument in the tracking script.
 </details>
