@@ -1,6 +1,6 @@
 # Point Tracking with Keypoint R-CNN and Classical Optical Flow 
 
-Predict and track keypoints of objects in real-time from a sequence of frames. You can use the tracked points with a solver, like the Quaternion solver, to estimate object poses from a single viewpoint.
+Predict and track keypoints of objects in real-time from a sequence of frames. You can use the tracked points with a solver, like the Quaternion solver, to estimate object poses from a single viewpoint. Big shoutout to [Lorenzo](https://github.com/lopenguin) for all his help and mentorship over the summer!
 
 # Features:
 - MobileNetV3-based backbone for Keypoint R-CNN or YOLO v8 keypoint detector
