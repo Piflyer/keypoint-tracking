@@ -99,7 +99,9 @@ blenderproc run generate-data.py <path/to/your/dataset> <path/to/textures> <path
 > **NOTE:**  We recommend at least 50K images per category but you might need more depending on your specific use case/task.
 
 <details>
-<summary> ### Training (Keypoint R-CNN)</summary>
+<summary>
+<h3> Training (Keypoint R-CNN)</h3>
+</summary>
 
 ```bash
 python train.py --dataset /path/to/your/dataset --backbone mobilenetv3 --num-epochs 50
