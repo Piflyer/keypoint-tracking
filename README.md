@@ -19,14 +19,51 @@ Predict and track keypoints of objects in real-time from a sequence of frames. Y
 
 You can use one of the provided pre-trained models for Keypoint-RCNN or you can also train your own model using the provided dataset and training scripts.
 
+## Getting Started
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/your-repo/kpt-rcnn-tracking.git
+   cd kpt-rcnn-tracking
+   ```
+
+2. Create a new Conda environment:
+   ```bash
+   conda create -n kpt-rcnn python=3.12
+   conda activate kpt-rcnn
+   ```
+
+3. Install the required dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+
 ## Using the Pre-trained Model
-We have provided the pre-trained weights for the Keypoint-RCNN model, which you can use for inference on your own images or video streams. To use the pre-trained model, simply load the weights and run inference as shown in the provided example scripts.
+We have provided the pre-trained weights for the Keypoint-RCNN and YOLOv8 models, which you can use for inference on your own images or video streams. To use the pre-trained model, simply load the weights and run inference as shown in the provided example scripts. We are shifting our focuse on YOLO models, and will be releasing more in the coming weeks.
 
 - Mugs Pretrained Model
 - LM-O Pretrained Model
 - Forks Pretrained Model [Coming Soon]
 - Pans Pretrained Model [Coming Soon]
 - NOCS Pretrained Model [Coming Soon]
+
+### Keypoint R-CNN Models
+
+| Model Name | Conformal Score | Number of Keypoints | Number of Classes (including background)
+|------------|------------------|---------------------|-----------------------------------------
+| Mugs Kpt-RCNN       | 0.0816              | 43                  | 2
+| LM-O Kpt-RCNN      | 0.0977              | 10                  | 9
+
+### YOLO Models
+
+> **NOTE:**  We are in the process of updating the tracking script and our Conformal Prediction implementation to support YOLO models.
+
+| Model Name | Conformal Score | Number of Keypoints | Number of Classes (including background)
+|------------|------------------|---------------------|-----------------------------------------
+| Mugs YOLOv8       | TBD              | 43                 | 2
+
+## Tracking Points
 
 ## Training Your Own Model (Keypoint R-CNN or YOLOv8)
 
