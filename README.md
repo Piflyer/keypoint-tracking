@@ -6,7 +6,7 @@ Predict and track keypoints of objects in real-time from a sequence of frames. Y
 - MobileNetV3-based backbone for Keypoint R-CNN or YOLO v8 keypoint detector
 - Modified Keypoint R-CNN to include point visibility detection through Conformal Prediction
 - Lukas-Kanade optical flow for tracking points between inference
-- Pretrained weights for mugs and a collection of [YCB-V](https://www.ycbbenchmarks.com/object-models/) objects
+- Pretrained weights for mugs and a collection of [LM-O](https://www.ycbbenchmarks.com/object-models/) objects
 
 ### Limitations:
 - Currently, category-based tracking (ie: cannot distinguish different mugs from each other)
@@ -64,7 +64,7 @@ We have provided the pre-trained weights for the Keypoint-RCNN and YOLOv8 models
 | Mugs YOLOv8       | TBD              | 43                 | 2
 
 ## Tracking Points
-You can use our tracking script to track points through video frames or image sequences. There are multiple types of sources that you can use with the tracking script.
+You can use our tracking script to track points through video frames or image sequences. There are multiple types of sources that you can use with the tracking script.The script will print out the tracked keypoints in JSON file in the `runs` directory.
 
 ``` bash
 python run_tracking.py  
@@ -199,13 +199,98 @@ blenderproc run generate-data.py <path/to/your/dataset> <path/to/textures> <path
 
 > **NOTE:**  We recommend at least 50K images per category but you might need more depending on your specific use case/task.
 
-<details>
-<summary>
-<h3> Training (Keypoint R-CNN)</h3>
-</summary>
+### Data Preparation
+Once you have generated your synthetic data, you can use the provided dataloader script to prepare for training.
 
 ```bash
-python train.py --dataset /path/to/your/dataset --backbone mobilenetv3 --num-epochs 50
+python utils/dataloader.py \
+    --root_dir \
+    --model_list \
+    --kpts3d_path \
+    --output_path \
+    --val_split \
+    --static_obj
 ```
+### Core Arguments
+
+- `root_dir`: The root directory of your dataset.
+- `model_list`: A list of model IDs to include in the dataset from the annotated 3D models folder.
+- `kpts3d_path`: The path to the 3D keypoints directory.
+- `output_path`: The path to the output directory for processed data. Will save JSONs of training and val.
+- `val_split`: The proportion of the dataset to use for validation.
+- `static_obj`: Whether all the 3D models are treated as a single class.
+
+<details>
+<summary>
+<h3> Additional Arguments</h3>
+</summary>
+
+- `--seed`: Random seed for reproducibility. Defaults to 42.
+- `--bbox_threshold`: Minimum bounding box visibility fraction to consider a detection valid. Defaults to 0.3.
+- `--occlusion_threshold`: Minimum number of visible keypoints to consider an object visible. Defaults to 3.
+- `--static_obj_id`: Object ID to treat as static. Defaults to 1.
+
+
+</details>
+
+<details>
+<summary>
+<h2> Training (Keypoint R-CNN) </h2>
+</summary>
+Once you have prepared your dataset, you can train a Keypoint R-CNN model using the provided training script. The script supports both classical Keypoint R-CNN and MobileNetV3-FPN backbone architectures.
+
+```bash
+python keypoint-rccn-train.py \
+    --dataset_path \
+    --num_classes \
+    --num_keypoints \
+    --batch_size \
+    --num_epochs \
+    --learning_rate
+```
+
+### Core Arguments:
+
+- `--dataset_path`: Path to the processed dataset directory containing train_labels.json and val_labels.json.
+- `--num_classes`: Number of classes including background (e.g., 2 for single object + background).
+- `--num_keypoints`: Number of keypoints to detect per object.
+- `--batch_size`: Batch size for training. Default is 32.
+- `--num_epochs`: Number of epochs to train. Default is 400.
+- `--learning_rate`: Learning rate for training. Default is 1e-5.
+
+### Example Usage:
+
+For training a mugs model with 43 keypoints:
+```bash
+python keypoint-rccn-train.py \
+    --dataset_path "path/to/mugs_dataset/rcnn-processed" \
+    --num_classes 2 \
+    --num_keypoints 43 \
+    --batch_size 16 \
+    --num_epochs 200 \
+    --learning_rate 1e-4
+```
+
+For training an LM-O multi-object model:
+```bash
+python keypoint-rccn-train.py \
+    --dataset_path "path/to/lmo_dataset/rcnn-processed" \
+    --num_classes 9 \
+    --num_keypoints 10 \
+    --batch_size 32 \
+    --num_epochs 400 \
+    --learning_rate 1e-5 \
+    --classical_model
+```
+
+### Additional Arguments
+
+
+- `--classical_model`: Use classical Keypoint R-CNN model without MobileNetV3-FPN backbone. Default is False.
+- `--warmup_epochs`: Number of warmup epochs for learning rate scheduling. Default is 10.
+- `--log_dir`: Directory to save logs and checkpoints. Default is 'runs'.
+- `--continue_training`: Continue training from the last checkpoint. Default is False.
+- `--checkpoint_path`: Path to the checkpoint file to continue training from.
+- `--checkpoint_tensorboard`: Path to the TensorBoard checkpoint directory to continue logging.
 
 </details>

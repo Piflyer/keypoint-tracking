@@ -20,6 +20,7 @@ import json
 import glob
 import os
 import natsort
+import datetime
 
 # Global error tracking dictionary
 epoch_error = dict()
@@ -1065,7 +1066,10 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
         print(f"Max tracking error: {np.nanmax(error_list):.2f} pixels")
         print(f"Valid error measurements: {len(valid_errors)} out of {len(error_list)} frames")
         print(f"Frames without error data (NaN): {nan_count}")
-    json_data_path = os.path.join(f'{model_type}_kpt_json_data.json')
+    cur_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    #check if runs directory exists
+    os.makedirs('runs', exist_ok=True)
+    json_data_path = os.path.join(f'runs/{cur_time}.json')
     with open(json_data_path, 'w') as f:
         json.dump(json_data, f, indent=2)
     print(f"JSON Keypoint saved to: {json_data_path}")

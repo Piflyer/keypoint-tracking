@@ -10,6 +10,7 @@ from PIL import Image
 import torch
 import glob
 import sys
+import argparse
 
 class BaseDataset():
     def __init__(self, root_dir, model_list=None, kpts3d_path=None):
@@ -286,146 +287,6 @@ class RCNNDataset(BaseDataset):
         json.dump(val_labels, open(os.path.join(output_path, 'val_labels.json'), 'w'), indent=4)
         print(f"Processed {len(train_labels)} training samples and {len(val_labels)} validation samples.")
 
-class HeatMapDataset(BaseDataset):
-    def __init__(self, root_dir, model_list=None, kpts3d_path=None):
-        super().__init__(root_dir, model_list, kpts3d_path)
-
-
-    def gaussian_eq(self, x: list, sigma=1):
-        
-        x = np.sqrt(x[0]**2 + x[1]**2)  # Convert to distance from origin
-        return (1 / (sigma * np.sqrt(2 * np.pi))) * np.exp(-(x ** 2) / (2 * sigma ** 2))
-
-    def processImage(self, output_path=None, input_dims=(256, 256), output_dims=(64, 64), bbox_threshold=0.3, val_split=0.2, seed=42, evaluate=False):
-        random.seed(seed)
-        if output_path is None:
-            raise ValueError("output_path must be specified to save the processed dataset.")
-        #refactor to handle multiple root directories and validation split and save to disk
-        if not self.scene_gt_info or not self.camera_info:
-            print("No scene_gt_info or camera_info loaded. Please load the dataset first.")
-            return
-        print("Processing images and generating heatmaps...")
-        # counter = 0
-        train_counter = -1
-        val_counter = -1
-        for root in tqdm(self.root_dir):
-            print(f"Processing root directory: {root}")
-            root_scene_gt_info = self.scene_gt_info[root]
-            root_scene_gt = self.scene_gt[root]
-            root_camera_info = self.camera_info[root]
-            val_bucket = int(len(root_scene_gt_info) * val_split)
-            train_bucket = len(root_scene_gt_info) - val_bucket
-            train_flag = True
-            #shuffle the root_scene_gt_info dictionary, keeping the key-value pairs intact
-            
-            for scene_id in tqdm(root_scene_gt_info.keys()):
-                #split into val and train buckets by the number of scenes
-                train_bucket -= 1
-                scene_gt_info = root_scene_gt_info[scene_id]
-                scene_gt_rt = root_scene_gt[scene_id]
-                camera_info = root_camera_info[scene_id]
-                K = np.array(camera_info['cam_K']).reshape(3, 3)
-                image = cv2.imread(os.path.join(root, 'rgb', "{number:06}".format(number=int(scene_id)) + ".jpg"))
-                w, h = image.shape[1], image.shape[0]
-                
-                # depth_scale = camera_info['depth_scale']
-                # depth_path = os.path.join(self.root_dir, 'depth', "{number:06}".format(number=scene_id) + ".png")
-                # depth_map = np.array(Image.open(depth_path)) * depth_scale
-                                
-                for j in range(len(scene_gt_rt)):
-                    if scene_gt_rt[j]['obj_id'] not in self.model_list:
-                        continue
-                    scene_rt_obj = scene_gt_rt[j]
-                    scene_box_obj = scene_gt_info[j]
-                    #First check of threshold
-                    if scene_box_obj['visib_fract'] < bbox_threshold:
-                        continue  # Skip this object if visibility fraction is below threshold
-                    else:
-                        if train_bucket < 0 and not evaluate:
-                            train_flag = False
-                            val_counter += 1
-                        else:
-                            train_counter += 1
-                        R = np.array(scene_rt_obj['cam_R_m2c']).reshape(3, 3)
-                        t = np.array(scene_rt_obj['cam_t_m2c']).reshape(3, 1)
-                        pose = np.vstack((np.hstack((R, t)), np.array([[0, 0, 0, 1]])))
-                        
-                        # project 3D points to 2D
-                        vertices = self.kpts3D[scene_rt_obj['obj_id']]
-                        vertices_world = pose @ np.hstack([vertices, np.ones((vertices.shape[0], 1))]).T  # Add homogeneous coordinate
-                        vertices_2d = K @ vertices_world[:3, :]
-                        vertices_2d /= vertices_2d[2, :]
-                        vertices_2d = np.rint(vertices_2d[:2, :]).astype(int)
-                        
-                        bbox = scene_box_obj['bbox_obj']
-                        x, y, w, h = bbox
-                        x -= 10
-                        y -= 10
-                        w += 20
-                        h += 20
-                        x = np.clip(x, 0, image.shape[1] - 1)
-                        y = np.clip(y, 0, image.shape[0] - 1)
-                        w = np.clip(w, 0, image.shape[1] - x - 1)
-                        h = np.clip(h, 0, image.shape[0] - y - 1)
-                        image_cropped = image[y:y+h, x:x+w]
-                        cropped_2dpts = vertices_2d.T - np.array([[x, y]])
-                        kpts_scale_x =  output_dims[0] * cropped_2dpts[:, 0] / w
-                        kpts_scale_y =  output_dims[1] * cropped_2dpts[:, 1] / h
-                        scaled_2dpts = np.array([kpts_scale_x, kpts_scale_y])
-                        #round to nearest integer
-                        vertices_2d = np.rint(scaled_2dpts).astype(int)
-                        image_cropped = cv2.resize(image_cropped, input_dims, interpolation=cv2.INTER_LINEAR)
-                        mod = np.meshgrid(np.arange(-1, 2), np.arange(-1, 2)) #updated to be a 3x3 grid
-                        mod = np.array(mod).reshape(2, -1).T
-                        
-                        heatmap_array = np.zeros((self.total_kpts, output_dims[1], output_dims[0]), dtype=np.float32)
-                        gaus_out = np.zeros(mod.shape[0])
-                        for j in range(mod.shape[0]):
-                            gaus_out[j] = self.gaussian_eq(mod[j], sigma=1)
-                        for j in range(vertices_2d.shape[1]):
-                            heatmap = np.zeros(output_dims, dtype=np.float32)
-                            x,y = vertices_2d[0, j], vertices_2d[1, j]
-                            x = np.clip(x, 0, output_dims[0] - 1)
-                            y = np.clip(y, 0, output_dims[1] - 1)
-                            for k in range(mod.shape[0]):
-                                x_mod = x + mod[k, 0]
-                                y_mod = y + mod[k, 1]
-                                if 0 <= x_mod < output_dims[0] and 0 <= y_mod < output_dims[1]:
-                                    heatmap[y_mod, x_mod] += gaus_out[k]
-                            
-                            max_val = np.max(heatmap)
-                            if max_val > 1e-6: 
-                                heatmap /= max_val
-                            heatmap_array[self.kpts3d_range[scene_rt_obj['obj_id']][0] + j, :, :] = heatmap           
-                        del heatmap # Moved del heatmap here, after it's used
-                        #rework logic to save onto disk
-                        if not os.path.exists(os.path.join(output_path, "train")) or not os.path.exists(os.path.join(output_path, "val")):
-                            os.makedirs(os.path.join(output_path, "train"))
-                            os.makedirs(os.path.join(output_path, "val"))
-                        if evaluate:
-                            if not os.path.exists(os.path.join(output_path, "eval")):
-                                os.makedirs(os.path.join(output_path, "eval"))
-                            cv2.imwrite(os.path.join(output_path, "eval", f"{scene_id}_{j:06d}.jpg"), image_cropped)
-                            np.save(os.path.join(output_path, "eval", f"{scene_id}_{j:06d}_heatmaps.npy"), heatmap_array)
-                            # save R and t to a file
-                            intrinsics_extrinsics = {
-                                'R': R.tolist(),
-                                't': t.tolist(),
-                                'K': K.tolist(),
-                                'obj_id': scene_rt_obj['obj_id'],
-                            }
-                            with open(os.path.join(output_path, "eval", f"{scene_id}_{j:06d}_intrinsics_extrinsics.json"), 'w') as f:
-                                json.dump(intrinsics_extrinsics, f)
-                            
-                        elif train_flag:
-                            cv2.imwrite(os.path.join(output_path, "train", f"{train_counter:06d}.jpg"), image_cropped)
-                            np.save(os.path.join(output_path, "train", f"{train_counter:06d}_heatmaps.npy"), heatmap_array)
-                        else:
-                            cv2.imwrite(os.path.join(output_path, "val", f"{val_counter:06d}.jpg"), image_cropped)
-                            np.save(os.path.join(output_path, "val", f"{val_counter:06d}_heatmaps.npy"), heatmap_array)
-                        del R, t, pose, vertices, vertices_world, vertices_2d  # Free memory
-                    del scene_rt_obj, scene_box_obj  # Free memory
-            
 class RCNNTorch(Dataset):
     def __init__(self, gt_file, transform=None, target_transform=None, augment=False, crop_size=(480, 640), angle_range=(-10, 10), totensor=True, single_class=False):
         with open(gt_file, 'r') as f:
@@ -554,72 +415,31 @@ class RCNNTorch(Dataset):
 
         return image, target
 
-class HeatMapTorch(Dataset):
-    def __init__(self, path, transform=None, target_transform=None):
-        self.path = path
-        self.transform = transform
-        self.target_transform = target_transform
-        self.image_files = sorted([f for f in os.listdir(path) if f.endswith('.jpg')])
-        
-    def __len__(self):
-        return len(self.image_files)
-
-    def __getitem__(self, idx):
-        image_filename = self.image_files[idx] 
-        image_path = os.path.join(self.path, image_filename)
-        base_name = image_filename.replace('.jpg', '')
-        heatmap_path = os.path.join(self.path, f"{base_name}_heatmaps.npy")
-
-        try:
-            image = cv2.imread(image_path)
-            if image is None:
-                raise IOError(f"Could not read image: {image_path}")
-            
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-            heatmaps = np.load(heatmap_path)
-
-        except Exception as e:
-            print(f"ERROR: An unexpected error occurred while loading data for sample index {idx}:")
-            print(f"Image path: {image_path}, Heatmap path: {heatmap_path}")
-            print(f"Error details: {e}")
-            raise # Re-raise the error
-
-        if self.transform:
-            image = self.transform(image)
-        if self.target_transform:
-            heatmaps = self.target_transform(heatmaps)
-        return image, heatmaps
 def custom_collate_fn(batch):
     images, targets = zip(*batch)
     images = torch.stack(images, dim=0)
     return images, targets
 
 if __name__ == "__main__":
-    # dataset = RCNNDataset(
-    #             root_dir="/Users/Tim/Documents/GitHub/Spark-25/kpt_rcnn_update/00*",
-    #             model_list=[1, 5, 6, 8, 9, 10, 11, 12],
-    #             kpts3d_path="/Users/Tim/Documents/GitHub/Spark-25/train_pbr/lmo_models/models_rcnn",
-    # )
-    # dataset._load_all_data()
-    # dataset.processImage(output_path="/Users/Tim/Documents/GitHub/Spark-25/kpt_rcnn_update/rcnn-processed", val_split=0.2, seed=42)
-    
-    #mugs
+    parser = argparse.ArgumentParser(description="Process and prepare dataset for Keypoint R-CNN tracking.")
+    parser.add_argument("--root_dir", type=str, help="Root directory of the dataset")
+    parser.add_argument("--model_list", type=list, help="List of model IDs to include")
+    parser.add_argument("--kpts3d_path", type=str, help="Path to the 3D keypoints")
+    parser.add_argument("--output_path", type=str, help="Path to save the processed dataset")
+    parser.add_argument("--val_split", type=float, default=0.2, help="Fraction of data to use for validation")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed for data splitting")
+    parser.add_argument("--bbox_threshold", type=float, default=0.3, help="Minimum bounding box visibility threshold")
+    parser.add_argument("--occlusion_threshold", type=int, default=3, help="Minimum number of keypoints visible for occlusion")
+    parser.add_argument("--static_obj", type=bool, default=False, help="Whether to treat these objects as a single class")
+    parser.add_argument("--static_obj_id", type=int, default=1, help="ID of the static object")
+    args = parser.parse_args()
     dataset = RCNNDataset(
-                root_dir="/Users/Tim/Documents/GitHub/Spark-25/mugs_nococo/train_pbr/*",
-                model_list=[1, 3, 4, 5, 14],
-                kpts3d_path="/Users/Tim/Documents/GitHub/Spark-25/mugs_nococo/models",
+                root_dir=args.root_dir,
+                model_list=args.model_list,
+                kpts3d_path=args.kpts3d_path,
     )
-    # dataset.load_scene_gt_info()
+    dataset.load_scene_gt_info()
     dataset.load_kpts3d()
     dataset.load_camera_info()
     dataset.load_scene_gt()
-    dataset.processImage(output_path="/Users/Tim/Documents/GitHub/Spark-25/mugs_nococo/rcnn-processed-xtds", val_split=0.2, seed=42, bbox_threshold=0.3, occulusion_threshold=3, static_obj=True, static_obj_id=1)
-    # import torchvision.transforms as transforms
-    # transforms_list = [
-    # transforms.ToTensor()]
-    # train_set = RCNNTorch(
-    # gt_file="/Users/Tim/Documents/GitHub/Spark-25/kpt_rcnn_update/rcnn-processed/train_labels.json",
-    # transform=transforms.Compose(transforms_list),
-    # )
-    # breakpoint()
-    # train_set.__getitem__(0)
+    dataset.processImage(output_path=args.output_path, val_split=args.val_split, seed=args.seed, bbox_threshold=args.bbox_threshold, occlusion_threshold=args.occlusion_threshold, static_obj=args.static_obj, static_obj_id=args.static_obj_id)
