@@ -89,7 +89,7 @@ python run_tracking.py
 
 ### Data Input Types:
 - `nocs`: NOCS (Normalized Object Coordinate Space) data format. This would be the NOCS folder containing images in `*_colors.png` format.
-- `bop`: BOP (Benchmarking Object Pose) data format. We have a custom dataloader for that, see how you can process your data [here](https://github.com/Piflyer/kpt-rcnn-tracking?tab=readme-ov-file#data-preparation).
+- `bop`: BOP (Benchmarking Object Pose) data format. We have a custom dataloader for that, see how you can process your data [here](https://github.com/Piflyer/keypoint-tracking?tab=readme-ov-file#data-preparation).
 - `folder`: A folder containing images for tracking. This should be in numerical order with no gaps (e.g., `0001.png`, `0002.png`, ...).
 - `video`: A video file for tracking. This can be either a video file or an OpenCV camera index.
 
