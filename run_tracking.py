@@ -909,21 +909,22 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
                 print("Ending processing.")
                 break
             # Check for frame refresh - start new video sequence
-            if frame_refresh and j > 0 and j % frame_refresh == 0:
-                print(f"\nFrame refresh at frame {j} - starting new video sequence {video_sequence_count + 1}")
-                
-                # Reset tracking state for new video sequence
-                old_gray = None
-                p0 = None
-                mask = None
-                tracking_manager.hardReset()
-                video_sequence_count += 1
-                
-                # Optional: fade existing trails when starting new sequence
-                if mask is not None:
-                    mask = cv.multiply(mask, 0.5)  # Fade trails by 50% for new sequence
-                needs_refresh = True
-            frame_gray = cv.cvtColor(img_np, cv.COLOR_BGR2GRAY)
+            if frame_refresh != 0:
+                if frame_refresh and j > 0 and j % frame_refresh == 0:
+                    print(f"\nFrame refresh at frame {j} - starting new video sequence {video_sequence_count + 1}")
+                    
+                    # Reset tracking state for new video sequence
+                    old_gray = None
+                    p0 = None
+                    mask = None
+                    tracking_manager.hardReset()
+                    video_sequence_count += 1
+                    
+                    # Optional: fade existing trails when starting new sequence
+                    if mask is not None:
+                        mask = cv.multiply(mask, 0.5)  # Fade trails by 50% for new sequence
+                    needs_refresh = True
+                frame_gray = cv.cvtColor(img_np, cv.COLOR_BGR2GRAY)
             # Run model inference every N frames or on first frame
             if frame_count % model_refresh_interval == 0 or old_gray is None or needs_refresh:
                 print(f"Frame {frame_count}: Running model inference...")

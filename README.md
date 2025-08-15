@@ -64,6 +64,70 @@ We have provided the pre-trained weights for the Keypoint-RCNN and YOLOv8 models
 | Mugs YOLOv8       | TBD              | 43                 | 2
 
 ## Tracking Points
+You can use our tracking script to track points through video frames or image sequences. There are multiple types of sources that you can use with the tracking script.
+
+``` bash
+python run_tracking.py  
+    --model_path \
+    --dataset_path  \
+    --data_type \
+    --model_type \
+    --num_classes \
+    --num_keypoints \
+    --conformal_threshold
+```
+
+### Core Arguments:
+
+- `--model_path`: Path to the trained model weights.
+- `--dataset_path`: Path to the dataset for tracking.
+- `--data_type`: Type of data (e.g., video, image). Current options are `nocs, bop, folder, video`
+- `--model_type`: Type of model (e.g., Keypoint R-CNN, YOLOv8). Current options are `kpt_rcnn, yolo`
+- `--num_classes`: Number of classes to track (including background). This only applies for Kpt-RCNN
+- `--num_keypoints`: Number of keypoints to track. This only applies for Kpt-RCNN
+- `--conformal_threshold`: Conformal prediction threshold. This only applies for Kpt-RCNN
+
+### Data Input Types:
+- `nocs`: NOCS (Normalized Object Coordinate Space) data format. This would be the NOCS folder containing images in `*_colors.png` format.
+- `bop`: BOP (Benchmarking Object Pose) data format. We have a custom dataloader for that, see how you can process your data here.
+- `folder`: A folder containing images for tracking. This should be in numerical order with no gaps (e.g., `0001.png`, `0002.png`, ...).
+- `video`: A video file for tracking. This can be either a video file or an OpenCV camera index.
+
+### Example Usage:
+
+For a video file using the pre-trained YOLO Mugs model:
+``` bash
+python run_tracking.py \
+    --model_path "mugs_yolo.pt" \
+    --dataset_path "test.avi" \
+    --model_type "yolo"
+```
+
+Or for a folder containing images using the pre-trained Keypoint R-CNN LM-O model:
+``` bash
+python run_tracking.py \
+    --model_path "lm_o_kpt_rcnn.pt" \
+    --dataset_path "images_folder" \
+    --model_type "kpt_rcnn" \
+    --num_classes 10 \
+    --num_keypoints 43 \
+    --conformal_threshold 0.0816
+```
+
+<details>
+<summary>
+<h3> Additional Arguments</h3>
+</summary>
+
+- `--model_refresh_interval`: Frequency (in frames) to run the model keypoint prediction. Default is 10
+- `--frame_refresh`: Frequency (in frames) to refresh the optical flow. Required when there is a new video sequence in the folder. Default is 50
+- `--no_fpn`: Only applicable if you trained Keypoint R-CNN without a MobileNetV3's Feature Pyramid Network (FPN). Default is False
+- `--kalman_process_noise`: Process noise covariance for the Kalman filter. Default is 1e-2
+- `--kalman_rcnn_noise`: Measurement noise covariance for the Kalman filter when using the learned model. Default is 1e-2
+- `--kalman_tracking_noise`: Measurement noise covariance for the Kalman filter when using optical flow. Default is 1e-4
+
+</details>
+
 
 ## Training Your Own Model (Keypoint R-CNN or YOLOv8)
 
