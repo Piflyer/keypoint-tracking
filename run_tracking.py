@@ -21,6 +21,7 @@ import glob
 import os
 import natsort
 import datetime
+import time
 
 # Global error tracking dictionary
 epoch_error = dict()
@@ -819,7 +820,7 @@ def visualizePredictions(image, predictions=None, targets=None, optical_flow_poi
     cv.imshow("Hybrid Keypoint Tracking", image)
     return image
 
-def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, model_type=None, model_refresh_interval=5, frame_refresh=10, no_fpn=False, num_classes=9, num_keypoints=10, kalman_process_noise=1e-2, kalman_rcnn_noise=1e-2, kalman_optical_flow_noise=1e-4, conformal_threshold=0.08):
+def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, model_type=None, model_refresh_interval=5, frame_refresh=10, no_fpn=False, num_classes=9, num_keypoints=10, kalman_process_noise=1e-2, kalman_rcnn_noise=1e-2, kalman_optical_flow_noise=1e-4, conformal_threshold=0.08, keypoint_path=None):
     """
     Run hybrid tracking with model inference every N frames and optical flow in between.
 
@@ -851,7 +852,6 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
         return
     dataset = DatasetLoader(dataset_path, data_type=data_type)
     num_frames_to_process = dataset.getNumFrames()
-    
     if model_type.lower() == 'kpt_rcnn':
         model = KeypointRCNN_Model(model_path=model_path, device=device, no_fpn=no_fpn, num_classes=num_classes, num_keypoints=num_keypoints)
     elif model_type.lower() == 'yolo':
@@ -898,7 +898,7 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
         print(f"Frame refresh every {frame_refresh} frames")
     print("=== PROCESSING FRAMES ===")
     NOCS_image_path = None
-    json_data = []
+    kpt_json_data = []
     j = 0
     while True:
         try:
@@ -1022,10 +1022,11 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
             for i, track_id in enumerate(active_tracks):
                 objid, instanceid, ptidx = map(int, track_id.split('_'))
                 keypoints[ptidx] = tracking_manager.getTrack(track_id).getState()
-
-            json_data.append({
+            end = time.time()
+            elapsed = end - start
+            kpt_json_data.append({
                 "est_pixel_keypoints": keypoints.tolist(),
-                "idx": j
+                "time": elapsed
             })
 
             # Update for next iteration
@@ -1034,7 +1035,7 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
             if tracking_manager is not None:
                 tracking_manager.step()
 
-            end = time.time()
+            
             avg_time.append(end - start)
 
             # Collect statistics only when model runs
@@ -1069,10 +1070,32 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
     cur_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     #check if runs directory exists
     os.makedirs('runs', exist_ok=True)
-    json_data_path = os.path.join(f'runs/{cur_time}.json')
+    json_data_path = os.path.join(f'runs/{cur_time}_keypoints.json')
     with open(json_data_path, 'w') as f:
-        json.dump(json_data, f, indent=2)
+        json.dump(kpt_json_data, f, indent=2)
     print(f"JSON Keypoint saved to: {json_data_path}")
+    if data_type.lower() == 'nocs':
+        print("Processing Category Level Keypoints...")
+        cam_K = np.array([[591.0125, 0, 322.525], [0, 590.16775, 244.11084], [0, 0, 1]])
+        if keypoint_path is None:
+            print("No keypoint path provided for NOCS dataset. Skipping category-level keypoint processing.")
+        else:
+            cat_json_data = []
+            cat_kpts = dict()
+            model_path = glob.glob(os.path.join(keypoint_path, '*.csv'))
+            for obj in model_path:
+                obj_name, format = os.path.basename(obj).split('.')
+                # Read keypoints from CSV
+                kpts = np.loadtxt(obj, delimiter=',')
+                cat_kpts[obj_name] = kpts.tolist()
+            cat_json_data.append(cat_kpts)
+            cat_json_data.append({
+                "cam_K": cam_K.tolist()
+            })
+            cat_json_path = os.path.join(f'runs/{cur_time}_category_keypoints.json')
+            with open(cat_json_path, 'w') as f:
+                json.dump(cat_json_data, f, indent=2)
+            print(f"Category-level keypoints saved to: {cat_json_path}")
 
     return error_list
 
@@ -1091,6 +1114,7 @@ if __name__ == "__main__":
     parser.add_argument("--kalman_rcnn_noise", type=float, default=1e-2, help="Kalman R-CNN noise.")
     parser.add_argument("--kalman_optical_flow_noise", type=float, default=1e-4, help="Kalman optical flow noise.")
     parser.add_argument("--conformal_threshold", type=float, default=0.08, help="Conformal threshold.")
+    parser.add_argument("--keypoint_path", type=str, default=None, help="Path to the keypoint JSON file for NOCS dataset.")
     args = parser.parse_args()
 
     errors = run_hybrid_tracking(
