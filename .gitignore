@@ -205,3 +205,40 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+runs/2025-09-12 22:09:57_category_keypoints.json
+runs/2025-09-12 22:09:57_keypoints.json
+runs/2025-09-12 22:14:19_category_keypoints.json
+runs/2025-09-12 22:14:19_keypoints.json
+runs/scene_1-laptop-xtds_category_keypoints.json
+runs/scene_1-laptop-xtds_keypoints.json
+runs/scene_1-mug_category_keypoints.json
+runs/scene_1-mug_keypoints.json
+runs/scene_2-laptop-xtds_category_keypoints.json
+runs/scene_2-laptop-xtds_keypoints.json
+runs/scene_2-mug_category_keypoints.json
+runs/scene_2-mug_keypoints.json
+runs/scene_3-laptop-xtds_category_keypoints.json
+runs/scene_3-laptop-xtds_keypoints.json
+runs/scene_3-mug_category_keypoints.json
+runs/scene_3-mug_keypoints.json
+runs/scene_4-laptop-xtds_category_keypoints.json
+runs/scene_4-laptop-xtds_keypoints.json
+runs/scene_4-mug_category_keypoints.json
+runs/scene_4-mug_keypoints.json
+runs/scene_5-laptop-xtds_category_keypoints.json
+runs/scene_5-laptop-xtds_keypoints.json
+runs/scene_5-mug_category_keypoints.json
+runs/scene_5-mug_keypoints.json
+runs/scene_6-laptop-xtds_category_keypoints.json
+runs/scene_6-laptop-xtds_keypoints.json
+runs/scene_6-mug_category_keypoints.json
+runs/scene_6-mug_keypoints.json
+runs/NOCS1-MUG-25/2025-09-12 17:34:52_category_keypoints.json
+runs/NOCS1-MUG-25/2025-09-12 17:34:52_keypoints.json
+runs/NOCS2-MUG-25/2025-09-12 17:35:54_category_keypoints.json
+runs/NOCS2-MUG-25/2025-09-12 17:35:54_keypoints.json
+runs/NOCS3-MUG-25/2025-09-12 17:36:47_category_keypoints.json
+runs/NOCS3-MUG-25/2025-09-12 17:36:47_keypoints.json
+runs/NOCS4-MUG-25/2025-09-12 17:38:19_category_keypoints.json
+runs/NOCS4-MUG-25/2025-09-12 17:38:19_keypoints.json
+hybrid_tracking_output_dataset.mp4

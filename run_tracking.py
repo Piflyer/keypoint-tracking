@@ -26,8 +26,10 @@ import time
 # Global error tracking dictionary
 epoch_error = dict()
 
-def FolderLoader(dataset_parent, NOCS=False):
-    if NOCS:
+def FolderLoader(dataset_parent, NOCS=False, depth=False):
+    if depth:
+        rgb_paths = natsort.natsorted(glob.glob(f"{dataset_parent}/*_depth.png"))
+    elif NOCS:
         rgb_paths = natsort.natsorted(glob.glob(f"{dataset_parent}/*_color.png"))
     else:
         rgb_paths = natsort.natsorted(glob.glob(f"{dataset_parent}/*.png") or glob.glob(f"{dataset_parent}/*.jpg"))
@@ -702,11 +704,14 @@ class YOLOPredictions:
 
         return keypoints, p0, tracking_manager, predictions, mask
 class DatasetLoader:
-    def __init__(self, data_path, data_type):
+    def __init__(self, data_path, data_type, depth=False):
         self.data_path = data_path
         self.data_type = data_type.lower()
         self.num_frames = 0
-        if self.data_type == 'nocs':
+        self.depth = depth
+        if self.depth:
+            self.loader, self.num_frames = FolderLoader(data_path, NOCS=False, depth=self.depth)
+        elif self.data_type == 'nocs':
             self.loader, self.num_frames = FolderLoader(data_path, NOCS=True)
         elif self.data_type == 'bop':
             transforms_list = [transforms.ToTensor()]
@@ -729,6 +734,10 @@ class DatasetLoader:
         target = None
         img_np = None
         image = None
+        if self.depth:
+            image = self.loader[i]
+            image = cv.imread(image, cv.IMREAD_UNCHANGED)
+            img_np = image.copy()
         if self.data_type == 'nocs' or self.data_type == 'folder':
             image = self.loader[i]
             image = cv.imread(image)
@@ -820,7 +829,7 @@ def visualizePredictions(image, predictions=None, targets=None, optical_flow_poi
     cv.imshow("Hybrid Keypoint Tracking", image)
     return image
 
-def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, model_type=None, model_refresh_interval=5, frame_refresh=10, no_fpn=False, num_classes=9, num_keypoints=10, kalman_process_noise=1e-2, kalman_rcnn_noise=1e-2, kalman_optical_flow_noise=1e-4, conformal_threshold=0.08, keypoint_path=None):
+def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, model_type=None, model_refresh_interval=5, frame_refresh=10, no_fpn=False, num_classes=9, num_keypoints=10, kalman_process_noise=1e-2, kalman_rcnn_noise=1e-2, kalman_optical_flow_noise=1e-4, conformal_threshold=0.08, keypoint_path=None, enable_visualization=False, NOCS_depth=False, output_name="tracking"):
     """
     Run hybrid tracking with model inference every N frames and optical flow in between.
 
@@ -838,6 +847,8 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
         kalman_rcnn_noise (float): R-CNN noise for Kalman filter. Default is 1e-2.
         kalman_optical_flow_noise (float): Optical flow noise for Kalman filter. Default is 1e-4.
         conformal_threshold (float): Conformal threshold for tracking. Default is 0.08.
+        keypoint_path (str): Path to the keypoint JSON file for NOCS dataset processing. Default is None.
+        enable_visualization (bool): Whether to enable visualization display. Default is False.
 
     Returns:
         list: List containing tracking errors for each dataset if using BOP dataset
@@ -851,6 +862,10 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
         print(f"Available data types are: nocs, bop, folder, video")
         return
     dataset = DatasetLoader(dataset_path, data_type=data_type)
+    depth_dataset = None
+    if NOCS_depth and data_type.lower() == 'nocs':
+        depth_dataset = DatasetLoader(dataset_path, data_type=data_type, depth=True)
+        print("Depth dataset loaded for NOCS depth processing.")
     num_frames_to_process = dataset.getNumFrames()
     if model_type.lower() == 'kpt_rcnn':
         model = KeypointRCNN_Model(model_path=model_path, device=device, no_fpn=no_fpn, num_classes=num_classes, num_keypoints=num_keypoints)
@@ -931,6 +946,7 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
                 print(f"Frame {frame_count}: Running model inference...")
                 # Run model prediction
                 kpts, p0, tracking_manager, output, mask = model.predict(image, tracking_manager=tracking_manager, img_np=img_np, mask=mask, conformal_threshold=conformal_threshold, kalman_process_noise=kalman_process_noise, kalman_rcnn_noise=kalman_rcnn_noise, kalman_optical_flow_noise=kalman_optical_flow_noise)
+                # breakpoint()
                 if output is not None:
                     model_output = [output]
                 else:
@@ -996,12 +1012,13 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
                     # No target data available
                     error_list.append(np.nan)
             # Visualize results with improved trail visualization
-            if model_output is not None:
+            img_display = None
+            if model_output is not None and enable_visualization:
                 # Model inference frame - show detections with existing trails
                 img_display = visualizePredictions(image, predictions=model_output, targets=None, 
                                     optical_flow_points=optical_flow_points, frame_num=frame_count, 
                                     mask=mask, show_trails=True)
-            else:
+            elif enable_visualization:
                 # Optical flow frame - emphasize the tracking trails
                 img_display = visualizePredictions(img_np, predictions=None, targets=None, 
                                     optical_flow_points=optical_flow_points, frame_num=frame_count, 
@@ -1012,8 +1029,11 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
                 # Resize if needed to match video writer dimensions
                 img_resized = cv.resize(img_display, (640, 480))
                 output_video.write(img_resized)
-
-            cv.waitKey(1)
+            
+            # Handle keyboard input only if visualization is enabled
+            if enable_visualization:
+                if cv.waitKey(1) & 0xFF == ord('q'):
+                    break
 
             keypoints = np.zeros((43, 2)) # just mugs
 
@@ -1024,9 +1044,36 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
                 keypoints[ptidx] = tracking_manager.getTrack(track_id).getState()
             end = time.time()
             elapsed = end - start
+            def pixel_to_world(kpts_pixel, cam_K, depth):
+                kpts_px = np.hstack([kpts_pixel, np.ones([kpts_pixel.shape[0], 1])])
+                kpts_world = depth[:, np.newaxis] * (np.linalg.inv(cam_K) @ kpts_px.T).T
+                return kpts_world
+            if NOCS_depth and depth_dataset is not None:
+                depth, _, _ = depth_dataset.load_data(j)
+                # show depth image for debugging
+                depth = depth.astype(np.float32)
+                depth32 = np.float32(depth[:, :, 1]*256) + np.float32(depth[:, :, 2])
+                depth32 = depth32.astype(np.float32) / 1000.0  # Convert mm to meters
+                depth_image = depth32
+                #clip keypoints to be within image bounds
+                # keypoints_d = keypoints.copy()
+                # keypoints_d[:, 0] = np.clip(keypoints[:, 0], 0, depth_image.shape[1]-1)
+                # keypoints_d[:, 1] = np.clip(keypoints[:, 1], 0, depth_image.shape[0]-1)
+                #get depth value at each keypoint
+                keypoints_d = keypoints.copy()
+                depth = depth_image[keypoints[:, 1].astype(int), keypoints[:, 0].astype(int)]
+                NOCS_cam_K = np.array([[591.0125, 0, 322.525], [0, 590.16775, 244.11084], [0, 0, 1]])
+                keypoints_d = pixel_to_world(keypoints_d, NOCS_cam_K, depth)
+                # try:
+                #     depth = depth_image[keypoints[:, 1].astype(int), keypoints[:, 0].astype(int)]
+                #     depth = np.nan_to_num(depth, nan=0.0)  # Replace NaNs with 0.0
+                #     keypoints_d = np.hstack((keypoints, depth.reshape(-1, 1)))
+                # except:
+                #     breakpoint()
             kpt_json_data.append({
                 "est_pixel_keypoints": keypoints.tolist(),
-                "time": elapsed
+                "time": elapsed,
+                "est_world_keypoints": keypoints_d.tolist() if NOCS_depth else None,
             })
 
             # Update for next iteration
@@ -1070,7 +1117,7 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
     cur_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     #check if runs directory exists
     os.makedirs('runs', exist_ok=True)
-    json_data_path = os.path.join(f'runs/{cur_time}_keypoints.json')
+    json_data_path = os.path.join(f'runs/{output_name}_keypoints.json')
     with open(json_data_path, 'w') as f:
         json.dump(kpt_json_data, f, indent=2)
     print(f"JSON Keypoint saved to: {json_data_path}")
@@ -1092,7 +1139,7 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
             cat_json_data.append({
                 "cam_K": cam_K.tolist()
             })
-            cat_json_path = os.path.join(f'runs/{cur_time}_category_keypoints.json')
+            cat_json_path = os.path.join(f'runs/{output_name}_category_keypoints.json')
             with open(cat_json_path, 'w') as f:
                 json.dump(cat_json_data, f, indent=2)
             print(f"Category-level keypoints saved to: {cat_json_path}")
@@ -1115,6 +1162,9 @@ if __name__ == "__main__":
     parser.add_argument("--kalman_optical_flow_noise", type=float, default=1e-4, help="Kalman optical flow noise.")
     parser.add_argument("--conformal_threshold", type=float, default=0.08, help="Conformal threshold.")
     parser.add_argument("--keypoint_path", type=str, default=None, help="Path to the keypoint JSON file for NOCS dataset.")
+    parser.add_argument("--enable_visualization", action="store_true", help="Enable visualization display.")
+    parser.add_argument("--NOCS_depth", action="store_true", help="Enable NOCS depth processing.")
+    parser.add_argument("--output_name", type=str, default="tracking", help="Output JSON file name.")
     args = parser.parse_args()
 
     errors = run_hybrid_tracking(
@@ -1127,7 +1177,11 @@ if __name__ == "__main__":
         num_classes=args.num_classes,
         num_keypoints=args.num_keypoints,
         no_fpn=args.no_fpn,
-        conformal_threshold=args.conformal_threshold
+        conformal_threshold=args.conformal_threshold,
+        keypoint_path=args.keypoint_path,
+        enable_visualization=args.enable_visualization,
+        NOCS_depth=args.NOCS_depth,
+        output_name=args.output_name,
     )
     if len(errors) > 0:
         # Plot error results like in optical-flow-test.py
