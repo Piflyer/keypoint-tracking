@@ -26,8 +26,10 @@ import time
 # Global error tracking dictionary
 epoch_error = dict()
 
-def FolderLoader(dataset_parent, NOCS=False, depth=False):
-    if depth:
+def FolderLoader(dataset_parent, NOCS=False, depth=False, meta=False):
+    if meta:
+        rgb_paths = natsort.natsorted(glob.glob(f"{dataset_parent}/*_meta.txt"))
+    elif depth:
         rgb_paths = natsort.natsorted(glob.glob(f"{dataset_parent}/*_depth.png"))
     elif NOCS:
         rgb_paths = natsort.natsorted(glob.glob(f"{dataset_parent}/*_color.png"))
@@ -704,11 +706,13 @@ class YOLOPredictions:
 
         return keypoints, p0, tracking_manager, predictions, mask
 class DatasetLoader:
-    def __init__(self, data_path, data_type, depth=False):
+    def __init__(self, data_path, data_type, depth=False, gt_path=None, scene_id=None):
         self.data_path = data_path
         self.data_type = data_type.lower()
         self.num_frames = 0
         self.depth = depth
+        self.gt_path = gt_path
+        self.scene_id = scene_id
         if self.depth:
             self.loader, self.num_frames = FolderLoader(data_path, NOCS=False, depth=self.depth)
         elif self.data_type == 'nocs':
@@ -735,10 +739,22 @@ class DatasetLoader:
         img_np = None
         image = None
         if self.depth:
-            image = self.loader[i]
-            image = cv.imread(image, cv.IMREAD_UNCHANGED)
-            img_np = image.copy()
-        if self.data_type == 'nocs' or self.data_type == 'folder':
+            image_path = self.loader[i]
+            # get the image name from the path
+            image_name = os.path.basename(image_path)
+            # now get the first 4 characters
+            frame_id = image_name[:4]
+            image = cv.imread(image_path, cv.IMREAD_UNCHANGED)
+            gt_pickled = os.path.join(self.gt_path, f"results_real_test_{self.scene_id}_{frame_id}.pkl")
+            try:
+                target = np.load(gt_pickled, allow_pickle=True)['gt_RTs']
+                #img_np will be META
+                #replace the depth.png with meta.txt
+                img_np = image_path.replace('depth.png', 'meta.txt')
+            except FileNotFoundError:
+                target = None
+                print(f"GT file not found: {gt_pickled}")
+        elif self.data_type == 'nocs' or self.data_type == 'folder':
             image = self.loader[i]
             image = cv.imread(image)
             img_np = image.copy()
@@ -829,7 +845,7 @@ def visualizePredictions(image, predictions=None, targets=None, optical_flow_poi
     cv.imshow("Hybrid Keypoint Tracking", image)
     return image
 
-def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, model_type=None, model_refresh_interval=5, frame_refresh=10, no_fpn=False, num_classes=9, num_keypoints=10, kalman_process_noise=1e-2, kalman_rcnn_noise=1e-2, kalman_optical_flow_noise=1e-4, conformal_threshold=0.08, keypoint_path=None, enable_visualization=False, NOCS_depth=False, output_name="tracking"):
+def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, model_type=None, model_refresh_interval=5, frame_refresh=10, no_fpn=False, num_classes=9, num_keypoints=10, kalman_process_noise=1e-2, kalman_rcnn_noise=1e-2, kalman_optical_flow_noise=1e-4, conformal_threshold=0.08, keypoint_path=None, enable_visualization=False, NOCS_depth=False, output_name="tracking", NOCS_gt_path = None, NOCS_OBJ_ID = None):
     """
     Run hybrid tracking with model inference every N frames and optical flow in between.
 
@@ -849,11 +865,20 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
         conformal_threshold (float): Conformal threshold for tracking. Default is 0.08.
         keypoint_path (str): Path to the keypoint JSON file for NOCS dataset processing. Default is None.
         enable_visualization (bool): Whether to enable visualization display. Default is False.
+        NOCS_gt_path (str): Path to the ground truth JSON file for NOCS dataset processing. Default is None.
 
     Returns:
         list: List containing tracking errors for each dataset if using BOP dataset
     """
-
+    NOCS_scene = None
+    if data_type.lower() == 'nocs' and dataset_path is not None:
+        #NOCS_scene is the last part of the dataset path
+        NOCS_scene = os.path.basename(os.path.normpath(dataset_path))
+        print(f"NOCS scene detected: {NOCS_scene}")
+    #remove the trailing .pt from model path for display
+    model_name = os.path.basename(model_path) if model_path is not None else "No model path provided"
+    model_name = model_name.replace(".pt", "")
+    print(f"Model: {model_name}")
     # Initialize error tracking
     hallucinate_counter = 0
     device = 'cpu'
@@ -864,7 +889,7 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
     dataset = DatasetLoader(dataset_path, data_type=data_type)
     depth_dataset = None
     if NOCS_depth and data_type.lower() == 'nocs':
-        depth_dataset = DatasetLoader(dataset_path, data_type=data_type, depth=True)
+        depth_dataset = DatasetLoader(dataset_path, data_type=data_type, depth=True, gt_path=NOCS_gt_path, scene_id=NOCS_scene)
         print("Depth dataset loaded for NOCS depth processing.")
     num_frames_to_process = dataset.getNumFrames()
     if model_type.lower() == 'kpt_rcnn':
@@ -1048,32 +1073,57 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
                 kpts_px = np.hstack([kpts_pixel, np.ones([kpts_pixel.shape[0], 1])])
                 kpts_world = depth[:, np.newaxis] * (np.linalg.inv(cam_K) @ kpts_px.T).T
                 return kpts_world
+            gt_list = None
+            obj_name = None
             if NOCS_depth and depth_dataset is not None:
-                depth, _, _ = depth_dataset.load_data(j)
+                depth, gts, meta = depth_dataset.load_data(j)
+                #visualize depth image
+                # depth_image = cv.normalize(depth, None, 0, 255, cv.NORM_MINMAX)
+                # depth_image = np.uint8(depth_image)
+                # cv.imshow("Depth Image", depth_image)
+                # cv.waitKey(1)
+                # breakpoint()
                 # show depth image for debugging
                 depth = depth.astype(np.float32)
-                depth32 = np.float32(depth[:, :, 1]*256) + np.float32(depth[:, :, 2])
-                depth32 = depth32.astype(np.float32) / 1000.0  # Convert mm to meters
-                depth_image = depth32
+                depth = depth.astype(np.float32) / 1000.0  # Convert mm to meters
                 #clip keypoints to be within image bounds
                 # keypoints_d = keypoints.copy()
                 # keypoints_d[:, 0] = np.clip(keypoints[:, 0], 0, depth_image.shape[1]-1)
                 # keypoints_d[:, 1] = np.clip(keypoints[:, 1], 0, depth_image.shape[0]-1)
                 #get depth value at each keypoint
                 keypoints_d = keypoints.copy()
-                depth = depth_image[keypoints[:, 1].astype(int), keypoints[:, 0].astype(int)]
+                depth = depth[keypoints[:, 1].astype(int), keypoints[:, 0].astype(int)]
                 NOCS_cam_K = np.array([[591.0125, 0, 322.525], [0, 590.16775, 244.11084], [0, 0, 1]])
                 keypoints_d = pixel_to_world(keypoints_d, NOCS_cam_K, depth)
+                if meta and gts is not None:
+                    with open(meta) as f:
+                        for line in f:
+                            info = line.split()
+                            try:
+                                if int(info[1]) == NOCS_OBJ_ID:
+                                    idx = int(info[0]) - 1
+                                    RT_gt = gts[idx, :, :]  # 4x4
+                                    RT_gt[:,0] = RT_gt[:,0] / np.linalg.norm(RT_gt[:,0])
+                                    RT_gt[:,1] = RT_gt[:,1] / np.linalg.norm(RT_gt[:,1])
+                                    RT_gt[:,2] = RT_gt[:,2] / np.linalg.norm(RT_gt[:,2])
+                                    gt_list = RT_gt
+                                    obj_name = info[2]
+                            except:
+                                print(f"Meta file {meta} has a mismatch.")
                 # try:
                 #     depth = depth_image[keypoints[:, 1].astype(int), keypoints[:, 0].astype(int)]
                 #     depth = np.nan_to_num(depth, nan=0.0)  # Replace NaNs with 0.0
                 #     keypoints_d = np.hstack((keypoints, depth.reshape(-1, 1)))
                 # except:
                 #     breakpoint()
+
             kpt_json_data.append({
                 "est_pixel_keypoints": keypoints.tolist(),
                 "time": elapsed,
                 "est_world_keypoints": keypoints_d.tolist() if NOCS_depth else None,
+                "rgb_image_filename": f"{str(j).zfill(4)}_color.png" if NOCS_scene is not None else None,
+                "gt_pose": gt_list.tolist() if NOCS_depth and gt_list is not None else None,
+                "obj_name": obj_name if obj_name is not None else None,
             })
 
             # Update for next iteration
@@ -1165,6 +1215,8 @@ if __name__ == "__main__":
     parser.add_argument("--enable_visualization", action="store_true", help="Enable visualization display.")
     parser.add_argument("--NOCS_depth", action="store_true", help="Enable NOCS depth processing.")
     parser.add_argument("--output_name", type=str, default="tracking", help="Output JSON file name.")
+    parser.add_argument("--NOCS_gt_path", type=str, default=None, help="Path to the ground truth JSON file for NOCS dataset.")
+    parser.add_argument("--NOCS_OBJ_ID", type=int, default=None, help="Object ID for NOCS dataset for GT pose extraction.")
     args = parser.parse_args()
 
     errors = run_hybrid_tracking(
@@ -1182,6 +1234,8 @@ if __name__ == "__main__":
         enable_visualization=args.enable_visualization,
         NOCS_depth=args.NOCS_depth,
         output_name=args.output_name,
+        NOCS_gt_path=args.NOCS_gt_path,
+        NOCS_OBJ_ID=args.NOCS_OBJ_ID,
     )
     if len(errors) > 0:
         # Plot error results like in optical-flow-test.py
