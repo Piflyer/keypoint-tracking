@@ -738,12 +738,13 @@ class DatasetLoader:
         target = None
         img_np = None
         image = None
+        file_name = None
         if self.depth:
             image_path = self.loader[i]
             # get the image name from the path
-            image_name = os.path.basename(image_path)
+            file_name = os.path.basename(image_path)
             # now get the first 4 characters
-            frame_id = image_name[:4]
+            frame_id = file_name[:4]
             image = cv.imread(image_path, cv.IMREAD_UNCHANGED)
             gt_pickled = os.path.join(self.gt_path, f"results_real_test_{self.scene_id}_{frame_id}.pkl")
             try:
@@ -756,6 +757,7 @@ class DatasetLoader:
                 print(f"GT file not found: {gt_pickled}")
         elif self.data_type == 'nocs' or self.data_type == 'folder':
             image = self.loader[i]
+            file_name = os.path.basename(image)
             image = cv.imread(image)
             img_np = image.copy()
         elif self.data_type == 'bop':
@@ -776,7 +778,7 @@ class DatasetLoader:
             else:
                 img_np = None
                 image = None
-        return image, target, img_np
+        return image, target, img_np, file_name
 
     def canErrorCalculate(self):
         return self.data_type == 'bop'
@@ -944,7 +946,7 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
         try:
             needs_refresh = False
             start = time.time()
-            image, target, img_np = dataset.load_data(j)
+            image, target, img_np, file_name = dataset.load_data(j)
             if image is None or img_np is None:
                 print(f"Frame {j}: No valid image found.")
                 print("Ending processing.")
@@ -1076,7 +1078,7 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
             gt_list = None
             obj_name = None
             if NOCS_depth and depth_dataset is not None:
-                depth, gts, meta = depth_dataset.load_data(j)
+                depth, gts, meta, _ = depth_dataset.load_data(j)
                 #visualize depth image
                 # depth_image = cv.normalize(depth, None, 0, 255, cv.NORM_MINMAX)
                 # depth_image = np.uint8(depth_image)
@@ -1092,7 +1094,12 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
                 # keypoints_d[:, 1] = np.clip(keypoints[:, 1], 0, depth_image.shape[0]-1)
                 #get depth value at each keypoint
                 keypoints_d = keypoints.copy()
-                depth = depth[keypoints[:, 1].astype(int), keypoints[:, 0].astype(int)]
+                # clamp keypoints to be within image bounds
+                keypoints_d[:, 0] = np.clip(keypoints[:, 0], 0, depth.shape[1]-1)
+                keypoints_d[:, 1] = np.clip(keypoints[:, 1], 0, depth.shape[0]-1)
+                # keypoints_d
+                
+                depth = depth[keypoints_d[:, 1].astype(int), keypoints_d[:, 0].astype(int)]
                 NOCS_cam_K = np.array([[591.0125, 0, 322.525], [0, 590.16775, 244.11084], [0, 0, 1]])
                 keypoints_d = pixel_to_world(keypoints_d, NOCS_cam_K, depth)
                 if meta and gts is not None:
@@ -1117,14 +1124,29 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
                 # except:
                 #     breakpoint()
 
-            kpt_json_data.append({
-                "est_pixel_keypoints": keypoints.tolist(),
-                "time": elapsed,
-                "est_world_keypoints": keypoints_d.tolist() if NOCS_depth else None,
-                "rgb_image_filename": f"{str(j).zfill(4)}_color.png" if NOCS_scene is not None else None,
-                "gt_pose": gt_list.tolist() if NOCS_depth and gt_list is not None else None,
-                "obj_name": obj_name if obj_name is not None else None,
-            })
+            # "est_world_keypoints": keypoints_d.tolist() if NOCS_depth else None,
+            # "rgb_image_filename": f"{str(j).zfill(4)}_color.png" if NOCS_scene is not None else None,
+            # "gt_pose": gt_list.tolist() if NOCS_depth and gt_list is not None else None,
+            # "obj_name": obj_name if obj_name is not None else None,
+            # add all of these to the json data IF they are not none so there are no NULL values
+            if NOCS_depth:
+                if gt_list is not None:
+                    kpt_json_data.append({
+                        "est_pixel_keypoints": keypoints.tolist(),
+                        "time": elapsed,
+                        "gt_pose": gt_list.tolist()
+                    })
+                    if obj_name is not None:
+                        kpt_json_data[-1]["obj_name"] = obj_name
+                    if NOCS_scene is not None:
+                        kpt_json_data[-1]["rgb_image_filename"] = file_name
+                    if keypoints_d is not None:
+                        kpt_json_data[-1]["est_world_keypoints"] = keypoints_d.tolist()
+            else:
+                kpt_json_data.append({
+                        "est_pixel_keypoints": keypoints.tolist(),
+                        "time": elapsed,
+                })
 
             # Update for next iteration
             old_gray = frame_gray.copy()
