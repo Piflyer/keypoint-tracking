@@ -236,6 +236,6 @@ if __name__ == '__main__':
     # expected_count = {"scene_1": 1, "scene_2": 1, "scene_3": 1, "scene_4": 1, "scene_5": 0, "scene_6": 2} # if > detected, reduce via confidence
 
     class_id = 3 # = camera
-    expected_count = {"scene_1": 1, "scene_2": 1, "scene_3": 1, "scene_4": 1, "scene_5": 2, "scene_6": 0} # if > detected, reduce via confidence
+    expected_count = {"scene_1": 1, "scene_2": 1, "scene_3": 1, "scene_4": 1, "scene_5": 1, "scene_6": 1} # if > detected, reduce via confidence
 
     main()
