@@ -21,12 +21,17 @@ import glob
 import os
 import natsort
 import datetime
+import time
 
 # Global error tracking dictionary
 epoch_error = dict()
 
-def FolderLoader(dataset_parent, NOCS=False):
-    if NOCS:
+def FolderLoader(dataset_parent, NOCS=False, depth=False, meta=False):
+    if meta:
+        rgb_paths = natsort.natsorted(glob.glob(f"{dataset_parent}/*_meta.txt"))
+    elif depth:
+        rgb_paths = natsort.natsorted(glob.glob(f"{dataset_parent}/*_depth.png"))
+    elif NOCS:
         rgb_paths = natsort.natsorted(glob.glob(f"{dataset_parent}/*_color.png"))
     else:
         rgb_paths = natsort.natsorted(glob.glob(f"{dataset_parent}/*.png") or glob.glob(f"{dataset_parent}/*.jpg"))
@@ -66,23 +71,86 @@ def errorCalculation(target, kpts, tracking_manager, frame_count, error_list, ha
                     objidx, instanceidx, ptidx = map(int, active_tracks[active_iter].split('_'))
 
             elif sum(target_labels == target_label) > 1 or instances > 1:
-                # multiple instances of this object - skip for now
-                # will use hungarian matching with distance thresholding
-                print("Multiple instances detected, skipping for now.")
-                # create a cost matrix for hungarian matching
-                if target_label not in hungarian_target_idx:
-                    hungarian_target_idx[target_label] = []
-                if target_label not in hungarian_predicted_id:
-                    hungarian_predicted_id[target_label] = []
-                # append the target index to the target index list
-                hungarian_target_idx[target_label].append(j)
-                # append the predicted index to the predicted index list
-                obj_idx, instance_idx, pt_idx = map(int, active_tracks[active_iter].split('_'))
-                while obj_idx == target_label:
-                    hungarian_predicted_id[target_label].append(active_tracks[active_iter])
-                    active_iter += 1
-                    if active_iter >= len(active_tracks):
+                # multiple instances detected - use point index and distance matching
+                print(f"Multiple instances detected for object {target_label}, using distance-based matching...")
+                
+                # Collect all target keypoints for this object class
+                target_indices = np.where(target_labels == target_label)[0]
+                
+                # Collect all predicted tracks for this object class
+                predicted_tracks = []
+                predicted_positions = []
+                
+                while active_iter < len(active_tracks):
+                    try:
+                        obj_idx, instance_idx, pt_idx = map(int, active_tracks[active_iter].split('_'))
+                        if obj_idx == target_label:
+                            predicted_tracks.append(active_tracks[active_iter])
+                            track_pos = tracking_manager.getTrack(active_tracks[active_iter]).getState()
+                            predicted_positions.append((track_pos, pt_idx, instance_idx))
+                            active_iter += 1
+                        else:
+                            break
+                    except:
+                        active_iter += 1
                         break
+                
+                # Match using point index priority and distance fallback
+                if predicted_tracks and len(target_indices) > 0:
+                    # Group predicted tracks by instance and point index for easier matching
+                    predicted_by_instance = {}
+                    for i, (pos, pt_idx, inst_idx) in enumerate(predicted_positions):
+                        if inst_idx not in predicted_by_instance:
+                            predicted_by_instance[inst_idx] = {}
+                        if pt_idx not in predicted_by_instance[inst_idx]:
+                            predicted_by_instance[inst_idx][pt_idx] = []
+                        predicted_by_instance[inst_idx][pt_idx].append((i, pos, predicted_tracks[i]))
+                    
+                    # Match each target keypoint
+                    for target_idx in target_indices:
+                        target_kpts_for_obj = target_kpts[target_idx]  # All keypoints for this target instance
+                        
+                        # Try to match keypoints by point index first
+                        for pt_idx in range(len(target_kpts_for_obj)):
+                            if len(target_kpts_for_obj[pt_idx]) >= 3 and target_kpts_for_obj[pt_idx][2] > 0:  # Valid keypoint
+                                target_point = target_kpts_for_obj[pt_idx][:2]
+                                
+                                best_match = None
+                                best_distance = float('inf')
+                                
+                                # First try exact point index match across all instances
+                                for inst_idx, instance_tracks in predicted_by_instance.items():
+                                    if pt_idx in instance_tracks:
+                                        for pred_idx, pred_pos, track_id in instance_tracks[pt_idx]:
+                                            distance = np.linalg.norm(pred_pos - target_point)
+                                            if distance < best_distance and distance < 50.0:  # Distance threshold
+                                                best_distance = distance
+                                                best_match = (pred_pos, target_point, track_id, inst_idx)
+                                
+                                # If no good index match, try distance-based matching across all points
+                                if best_match is None:
+                                    for inst_idx, instance_tracks in predicted_by_instance.items():
+                                        for pred_pt_idx, pred_list in instance_tracks.items():
+                                            for pred_idx, pred_pos, track_id in pred_list:
+                                                distance = np.linalg.norm(pred_pos - target_point)
+                                                if distance < best_distance and distance < 30.0:  # Stricter threshold for cross-index matching
+                                                    best_distance = distance
+                                                    best_match = (pred_pos, target_point, track_id, inst_idx)
+                                
+                                # Add successful match to error calculation
+                                if best_match is not None:
+                                    predicted_xy.append(best_match[0])
+                                    target_xy.append(best_match[1])
+                                    # Remove matched track from future consideration
+                                    matched_inst_idx = best_match[3]
+                                    if matched_inst_idx in predicted_by_instance:
+                                        for pred_pt_idx in list(predicted_by_instance[matched_inst_idx].keys()):
+                                            predicted_by_instance[matched_inst_idx][pred_pt_idx] = [
+                                                (i, pos, tid) for i, pos, tid in predicted_by_instance[matched_inst_idx][pred_pt_idx] 
+                                                if tid != best_match[2]
+                                            ]
+                                            if not predicted_by_instance[matched_inst_idx][pred_pt_idx]:
+                                                del predicted_by_instance[matched_inst_idx][pred_pt_idx]
                     obj_idx, instance_idx, pt_idx = map(int, active_tracks[active_iter].split('_'))
             else:
                 # object not tracked with prediction, false negative
@@ -313,6 +381,7 @@ class PointTrackManager:
         tempActiveTracks (list): Temporary list of active tracks.
         instance_counter (dict): Dictionary to count instances for each object ID.
         tempTracks (list): Temporary list of tracks.
+        instance_centroids (dict): Dictionary to store centroid positions for consistent instance tracking.
     """
     def __init__ (self):
         """
@@ -323,6 +392,18 @@ class PointTrackManager:
         self.tempActiveTracks = []
         self.instance_counter = dict()
         self.tempTracks = []
+        # Add instance tracking for consistent multi-object handling
+        self.instance_centroids = dict()  # {objid: {instance_id: centroid_position}}
+        self.instance_threshold = 100.0  # Distance threshold for instance matching
+        
+        # Persistent instance memory - survives optical flow resets and tracking loss
+        self.persistent_instance_memory = dict()  # {objid: {instance_id: {'centroid': (x,y), 'last_seen': frame_num, 'velocity': (vx,vy), 'confidence': float}}}
+        self.instance_memory_decay_frames = 300  # Number of frames after which memory decays
+        self.instance_memory_threshold = 150.0  # Distance threshold for memory-based matching
+        self.current_frame_num = 0  # Track current frame for memory management
+        
+        # Enable debug output for memory-based tracking
+        self.debug_instance_tracking = True
 
     def addTrack(self, xy, objid, ptidx, source="RCNN", confidence=1.0, process_noise=1e-2, kpt_rcnn_noise=1e-1, optical_flow_noise=1e-3):
         """
@@ -490,6 +571,76 @@ Generate doc string with args and return for each function and class if haven't 
         self.tracks = []
         self.active_tracks = []
         self.instance_counter = dict()
+        # Note: We intentionally DO NOT clear persistent_instance_memory 
+        # This is the key improvement - memory persists across resets
+
+    def updateFrameNumber(self, frame_num):
+        """
+        Update the current frame number for memory management.
+        
+        Args:
+            frame_num (int): Current frame number
+        """
+        self.current_frame_num = frame_num
+        self._cleanupExpiredMemory()
+    
+    def _cleanupExpiredMemory(self):
+        """
+        Remove expired instance memories that are too old.
+        """
+        for objid in list(self.persistent_instance_memory.keys()):
+            for instance_id in list(self.persistent_instance_memory[objid].keys()):
+                last_seen = self.persistent_instance_memory[objid][instance_id]['last_seen']
+                if self.current_frame_num - last_seen > self.instance_memory_decay_frames:
+                    print(f"Frame {self.current_frame_num}: Removing expired memory for obj {objid}, instance {instance_id} (last seen frame {last_seen})")
+                    del self.persistent_instance_memory[objid][instance_id]
+            # Remove empty object entries
+            if not self.persistent_instance_memory[objid]:
+                del self.persistent_instance_memory[objid]
+    
+    def updateInstanceMemory(self, objid, instance_id, centroid, velocity=(0, 0)):
+        """
+        Update the persistent memory for an instance.
+        
+        Args:
+            objid (int): Object class ID
+            instance_id (int): Instance ID 
+            centroid (tuple): Current centroid position (x, y)
+            velocity (tuple): Velocity vector (vx, vy)
+        """
+        if objid not in self.persistent_instance_memory:
+            self.persistent_instance_memory[objid] = {}
+        
+        self.persistent_instance_memory[objid][instance_id] = {
+            'centroid': centroid,
+            'last_seen': self.current_frame_num,
+            'velocity': velocity,
+            'confidence': 1.0  # Could be made dynamic based on tracking quality
+        }
+    
+    def getPredictedMemoryPosition(self, objid, instance_id, frames_ahead=1):
+        """
+        Get predicted position for an instance based on memory and velocity.
+        
+        Args:
+            objid (int): Object class ID
+            instance_id (int): Instance ID
+            frames_ahead (int): Number of frames to predict ahead
+            
+        Returns:
+            tuple: Predicted (x, y) position or None if no memory
+        """
+        if objid in self.persistent_instance_memory and instance_id in self.persistent_instance_memory[objid]:
+            memory = self.persistent_instance_memory[objid][instance_id]
+            cx, cy = memory['centroid']
+            vx, vy = memory['velocity']
+            
+            # Simple linear prediction
+            pred_x = cx + vx * frames_ahead
+            pred_y = cy + vy * frames_ahead
+            
+            return (pred_x, pred_y)
+        return None
 
     def getBatchStates(self):
         """
@@ -499,6 +650,190 @@ Generate doc string with args and return for each function and class if haven't 
             list: List of current states for all tracks.
         """
         return [track.getState() for track in self.tracks]
+    
+    def findBestInstanceMatch(self, objid, keypoints_positions):
+        """
+        Find the best instance match for a set of keypoints based on spatial proximity, temporal consistency, and persistent memory.
+        Enhanced to use persistent memory that survives optical flow resets.
+        
+        Args:
+            objid (int): Object class ID
+            keypoints_positions (list): List of keypoint positions [(x, y), ...]
+            
+        Returns:
+            int: Best matching instance ID
+        """
+        if not keypoints_positions:
+            return self.getNextInstanceId(objid)
+            
+        # Calculate centroid of current keypoints
+        current_centroid = np.mean(keypoints_positions, axis=0)
+        
+        # Initialize instance tracking data structures if needed
+        if not hasattr(self, 'instance_centroids'):
+            self.instance_centroids = {}
+        if not hasattr(self, 'instance_last_seen'):
+            self.instance_last_seen = {}
+        if not hasattr(self, 'instance_threshold'):
+            self.instance_threshold = 100.0  # pixels
+        if not hasattr(self, 'instance_timeout'):
+            self.instance_timeout = 50  # frames
+        if not hasattr(self, 'current_frame'):
+            self.current_frame = 0
+            
+        # Clean up old instances that haven't been seen recently (but not from persistent memory)
+        current_frame = getattr(self, 'current_frame', 0)
+        if objid in self.instance_last_seen:
+            instances_to_remove = []
+            for instance_id, last_frame in self.instance_last_seen[objid].items():
+                if current_frame - last_frame > self.instance_timeout:
+                    instances_to_remove.append(instance_id)
+            
+            for instance_id in instances_to_remove:
+                if objid in self.instance_centroids and instance_id in self.instance_centroids[objid]:
+                    del self.instance_centroids[objid][instance_id]
+                del self.instance_last_seen[objid][instance_id]
+        
+        best_instance = None
+        min_distance = float('inf')
+        match_source = "none"
+        
+        # First priority: Check against current active instances
+        if objid in self.instance_centroids and self.instance_centroids[objid]:
+            for instance_id, stored_centroid in self.instance_centroids[objid].items():
+                # Try to get predicted position from active tracks first
+                predicted_centroid = self.getInstancePredictedCentroid(objid, instance_id)
+                if predicted_centroid is not None:
+                    # Use predicted position (more accurate)
+                    distance = np.linalg.norm(current_centroid - predicted_centroid)
+                else:
+                    # Fall back to stored centroid
+                    distance = np.linalg.norm(current_centroid - stored_centroid)
+                
+                if distance < min_distance:
+                    min_distance = distance
+                    best_instance = instance_id
+                    match_source = "active"
+        
+        # Second priority: Check against persistent memory if no good active match
+        if (best_instance is None or min_distance > self.instance_threshold) and objid in self.persistent_instance_memory:
+            for instance_id, memory_data in self.persistent_instance_memory[objid].items():
+                # Get predicted position based on memory and velocity
+                frames_since_seen = self.current_frame_num - memory_data['last_seen']
+                if frames_since_seen > 0:
+                    predicted_pos = self.getPredictedMemoryPosition(objid, instance_id, frames_since_seen)
+                    if predicted_pos:
+                        distance = np.linalg.norm(current_centroid - np.array(predicted_pos))
+                    else:
+                        # Fall back to raw centroid from memory
+                        distance = np.linalg.norm(current_centroid - np.array(memory_data['centroid']))
+                else:
+                    # Same frame, use direct centroid
+                    distance = np.linalg.norm(current_centroid - np.array(memory_data['centroid']))
+                
+                # Use more lenient threshold for memory-based matching
+                if distance < min(min_distance, self.instance_memory_threshold):
+                    min_distance = distance
+                    best_instance = instance_id
+                    match_source = "memory"
+        
+        # Accept match if within reasonable distance
+        if best_instance is not None and min_distance < (self.instance_memory_threshold if match_source == "memory" else self.instance_threshold):
+            # Update current instance tracking
+            if objid not in self.instance_centroids:
+                self.instance_centroids[objid] = {}
+            if objid not in self.instance_last_seen:
+                self.instance_last_seen[objid] = {}
+                
+            # Update centroid with exponential moving average for smoother tracking
+            alpha = 0.7  # Weight for old centroid (higher = more stable)
+            if best_instance in self.instance_centroids[objid]:
+                old_centroid = self.instance_centroids[objid][best_instance]
+                self.instance_centroids[objid][best_instance] = alpha * old_centroid + (1 - alpha) * current_centroid
+            else:
+                # First time seeing this instance in current tracking session
+                self.instance_centroids[objid][best_instance] = current_centroid.copy()
+                
+            self.instance_last_seen[objid][best_instance] = current_frame
+            
+            # Update persistent memory with current information
+            velocity = (0, 0)  # Could be enhanced with actual velocity calculation
+            self.updateInstanceMemory(objid, best_instance, tuple(current_centroid), velocity)
+            
+            # Debug: Print instance matching info occasionally
+            if hasattr(self, 'debug_instance_tracking') and self.debug_instance_tracking:
+                print(f"  -> Matched to instance {best_instance} via {match_source} (distance: {min_distance:.1f}px)")
+            
+            return best_instance
+        
+        # No good match found, create new instance
+        new_instance_id = self.getNextInstanceId(objid)
+        
+        # Store centroid and tracking info for this new instance
+        if objid not in self.instance_centroids:
+            self.instance_centroids[objid] = {}
+        if objid not in self.instance_last_seen:
+            self.instance_last_seen[objid] = {}
+            
+        self.instance_centroids[objid][new_instance_id] = current_centroid.copy()
+        self.instance_last_seen[objid][new_instance_id] = current_frame
+        
+        # Add to persistent memory
+        velocity = (0, 0)  # Could be enhanced with velocity tracking
+        self.updateInstanceMemory(objid, new_instance_id, tuple(current_centroid), velocity)
+        
+        # Debug: Print new instance creation info occasionally
+        if hasattr(self, 'debug_instance_tracking') and self.debug_instance_tracking:
+            print(f"  -> Created new instance {new_instance_id} (no match within threshold)")
+        
+        return new_instance_id
+    
+    def updateFrameCounter(self):
+        """Update the current frame counter for instance tracking."""
+        if not hasattr(self, 'current_frame'):
+            self.current_frame = 0
+        self.current_frame += 1
+    
+    def getInstancePredictedCentroid(self, objid, instance_id):
+        """
+        Get predicted centroid for an instance based on current tracks.
+        
+        Args:
+            objid (int): Object class ID
+            instance_id (int): Instance ID
+            
+        Returns:
+            np.array or None: Predicted centroid position
+        """
+        # Find all tracks for this instance
+        instance_tracks = []
+        for track in self.tracks:
+            try:
+                track_objid, track_instid, track_ptid = map(int, track.getID().split('_'))
+                if track_objid == objid and track_instid == instance_id:
+                    instance_tracks.append(track.getState())
+            except ValueError:
+                continue
+        
+        if instance_tracks:
+            # Return centroid of tracked points
+            return np.mean(instance_tracks, axis=0)
+        else:
+            # Fall back to stored centroid if no active tracks
+            if (hasattr(self, 'instance_centroids') and 
+                objid in self.instance_centroids and 
+                instance_id in self.instance_centroids[objid]):
+                return self.instance_centroids[objid][instance_id]
+        
+        return None
+    
+    def getNextInstanceId(self, objid):
+        """Get the next available instance ID for an object class."""
+        if objid not in self.instance_counter:
+            self.instance_counter[objid] = 0
+        else:
+            self.instance_counter[objid] += 1
+        return self.instance_counter[objid]
 
 class KeypointRCNN_Model:
     def __init__ (self, model_path=None, device='cpu', num_classes=9, num_keypoints=10, no_fpn=False):
@@ -668,27 +1003,101 @@ class YOLOPredictions:
         label = output.boxes.cls
         confidence = output.keypoints.conf
         keypoints = output.keypoints.xy
-        if len(keypoints) > 0:
-            predictions = None 
-        else:
-            predictions = [{
-                "boxes": output.boxes.xyxy.cpu().numpy(),
-                "labels": label.cpu().numpy(),
-                "keypoints": keypoints.cpu().numpy(),
-                "keypoints_scores": confidence.cpu().numpy()
-            }]
-        if len(keypoints) > 0:
+        
+        # Check if we have any detections
+        has_detections = len(keypoints) > 0 and len(label) > 0
+        
+        if has_detections:
             tracking_manager.softReset()
             if mask is not None:
                 mask = cv.multiply(mask, 0.85)  # Fade trails by 15% each model refresh
             else:
                 mask = np.zeros_like(img_np)
+                
+            # Create predictions structure with instance IDs for visualization
+            pred_boxes = []
+            pred_labels = []
+            pred_keypoints = []
+            pred_keypoints_scores = []
+            pred_instance_ids = []
             
+            # Group detections by object class for better instance management
+            detections_by_class = {}
             for obj_idx in range(len(keypoints)):
-                tracking_manager.updateInstanceCounter(obj_idx)  # Increment instance counter for this object
+                # Check if label array has enough elements
+                if obj_idx >= len(label):
+                    continue
+                obj_class = int(label[obj_idx])
+                if obj_class not in detections_by_class:
+                    detections_by_class[obj_class] = []
+                
+                # Get valid keypoints for this detection
+                valid_keypoints = []
                 for kpt_idx in range(len(keypoints[obj_idx])):
                     if float(sum(keypoints[obj_idx][kpt_idx])) != 0:
-                        tracking_manager.addTrack(keypoints[obj_idx][kpt_idx], int(label[obj_idx]), kpt_idx, source="gt", confidence=confidence[obj_idx][kpt_idx], process_noise=kalman_process_noise, kpt_rcnn_noise=kalman_rcnn_noise, optical_flow_noise=kalman_optical_flow_noise)
+                        valid_keypoints.append(keypoints[obj_idx][kpt_idx])
+                
+                if valid_keypoints:
+                    detections_by_class[obj_class].append({
+                        'obj_idx': obj_idx,
+                        'keypoints': keypoints[obj_idx],
+                        'valid_keypoints': valid_keypoints,
+                        'confidence': confidence[obj_idx]
+                    })
+            
+            # Process each object class separately for consistent instance tracking
+            for obj_class, detections in detections_by_class.items():
+                for detection in detections:
+                    # Find best instance match based on spatial proximity
+                    valid_positions = [kp[:2] for kp in detection['valid_keypoints']]
+                    instance_id = tracking_manager.findBestInstanceMatch(obj_class, valid_positions)
+                    
+                    # Add to predictions structure for visualization
+                    obj_idx = detection['obj_idx']
+                    pred_boxes.append(output.boxes.xyxy[obj_idx])
+                    pred_labels.append(label[obj_idx])
+                    pred_keypoints.append(keypoints[obj_idx])
+                    pred_keypoints_scores.append(confidence[obj_idx])
+                    pred_instance_ids.append(instance_id)
+                    
+                    # Add tracks for this instance
+                    for kpt_idx in range(len(detection['keypoints'])):
+                        if float(sum(detection['keypoints'][kpt_idx])) != 0:
+                            # Use the matched instance_id instead of auto-incrementing
+                            track_id = f"{obj_class}_{instance_id}_{kpt_idx}"
+                            
+                            # Check if track exists and update, otherwise create new
+                            existing_track = None
+                            for track in tracking_manager.tracks:
+                                if track.getID() == track_id:
+                                    existing_track = track
+                                    break
+                            
+                            if existing_track:
+                                existing_track.updatePoint(detection['keypoints'][kpt_idx], source="gt", confidence=detection['confidence'][kpt_idx])
+                                tracking_manager.tempTracks.append(existing_track)
+                            else:
+                                new_track = PointTrack(detection['keypoints'][kpt_idx], trackId=track_id, 
+                                                     confidence=detection['confidence'][kpt_idx], 
+                                                     process_noise=kalman_process_noise or 1e-2, 
+                                                     kpt_rcnn_noise=kalman_rcnn_noise or 1e-2, 
+                                                     optical_flow_noise=kalman_optical_flow_noise or 1e-4)
+                                tracking_manager.tempTracks.append(new_track)
+                            
+                            tracking_manager.active_tracks.append(track_id)
+            
+            # Create predictions structure with instance IDs
+            if pred_boxes:
+                predictions = [{
+                    "boxes": torch.stack(pred_boxes) if pred_boxes else torch.empty(0, 4),
+                    "labels": torch.stack(pred_labels) if pred_labels else torch.empty(0),
+                    "keypoints": torch.stack(pred_keypoints) if pred_keypoints else torch.empty(0, len(keypoints[0]), 2),
+                    "keypoints_scores": torch.stack(pred_keypoints_scores) if pred_keypoints_scores else torch.empty(0, len(keypoints[0])),
+                    "instance_ids": pred_instance_ids
+                }]
+            else:
+                predictions = None
+                
             tracking_manager.mergeTracks()  # Merge temporary tracks into main tracking manager
             state_batch = tracking_manager.getBatchStates()
             if len(state_batch) > 0:
@@ -696,16 +1105,28 @@ class YOLOPredictions:
             else:
                 p0 = None
         else:
+            # Handle case where no detections found
+            predictions = [{
+                "boxes": output.boxes.xyxy.cpu().numpy() if len(output.boxes.xyxy) > 0 else np.array([]),
+                "labels": label.cpu().numpy() if len(label) > 0 else np.array([]),
+                "keypoints": keypoints.cpu().numpy() if len(keypoints) > 0 else np.array([]),
+                "keypoints_scores": confidence.cpu().numpy() if confidence is not None and len(confidence) > 0 else np.array([])
+            }]
             p0 = None
             mask = np.zeros_like(img_np)  # Reset mask if no detections
 
         return keypoints, p0, tracking_manager, predictions, mask
 class DatasetLoader:
-    def __init__(self, data_path, data_type):
+    def __init__(self, data_path, data_type, depth=False, gt_path=None, scene_id=None):
         self.data_path = data_path
         self.data_type = data_type.lower()
         self.num_frames = 0
-        if self.data_type == 'nocs':
+        self.depth = depth
+        self.gt_path = gt_path
+        self.scene_id = scene_id
+        if self.depth:
+            self.loader, self.num_frames = FolderLoader(data_path, NOCS=False, depth=self.depth)
+        elif self.data_type == 'nocs':
             self.loader, self.num_frames = FolderLoader(data_path, NOCS=True)
         elif self.data_type == 'bop':
             transforms_list = [transforms.ToTensor()]
@@ -728,8 +1149,26 @@ class DatasetLoader:
         target = None
         img_np = None
         image = None
-        if self.data_type == 'nocs' or self.data_type == 'folder':
+        file_name = None
+        if self.depth:
+            image_path = self.loader[i]
+            # get the image name from the path
+            file_name = os.path.basename(image_path)
+            # now get the first 4 characters
+            frame_id = file_name[:4]
+            image = cv.imread(image_path, cv.IMREAD_UNCHANGED)
+            gt_pickled = os.path.join(self.gt_path, f"results_real_test_{self.scene_id}_{frame_id}.pkl")
+            try:
+                target = np.load(gt_pickled, allow_pickle=True)['gt_RTs']
+                #img_np will be META
+                #replace the depth.png with meta.txt
+                img_np = image_path.replace('depth.png', 'meta.txt')
+            except FileNotFoundError:
+                target = None
+                print(f"GT file not found: {gt_pickled}")
+        elif self.data_type == 'nocs' or self.data_type == 'folder':
             image = self.loader[i]
+            file_name = os.path.basename(image)
             image = cv.imread(image)
             img_np = image.copy()
         elif self.data_type == 'bop':
@@ -750,13 +1189,13 @@ class DatasetLoader:
             else:
                 img_np = None
                 image = None
-        return image, target, img_np
+        return image, target, img_np, file_name
 
     def canErrorCalculate(self):
         return self.data_type == 'bop'
 
-def visualizePredictions(image, predictions=None, targets=None, optical_flow_points=None, frame_num=None, mask=None, show_trails=True, frame_refresh=None):
-    """Visualize predictions and optical flow points."""
+def visualizePredictions(image, predictions=None, targets=None, optical_flow_points=None, frame_num=None, mask=None, show_trails=True, frame_refresh=None, tracking_manager=None):
+    """Visualize predictions and optical flow points with multi-instance support."""
     if isinstance(image, torch.Tensor):
         image = image.squeeze(0).permute(1, 2, 0).cpu().numpy()
         # image = (image * np.array([0.229, 0.224, 0.225]) + np.array([0.485, 0.456, 0.406]))
@@ -768,18 +1207,51 @@ def visualizePredictions(image, predictions=None, targets=None, optical_flow_poi
     if mask is not None and show_trails:
         image = cv.add(image, mask)
 
+    # Define colors for different instances
+    instance_colors = [
+        (255, 0, 0),    # Red - Instance 0
+        (0, 255, 0),    # Green - Instance 1  
+        (0, 0, 255),    # Blue - Instance 2
+        (255, 255, 0),  # Cyan - Instance 3
+        (255, 0, 255),  # Magenta - Instance 4
+        (0, 255, 255),  # Yellow - Instance 5
+        (128, 0, 255),  # Purple - Instance 6
+        (255, 128, 0),  # Orange - Instance 7
+    ]
+
     if predictions is not None:
-        for i in range(len(predictions[0]['boxes'])):
-            box = predictions[0]['boxes'][i].cpu().numpy().astype(int)
-            cv.rectangle(image, (box[0], box[1]), (box[2], box[3]), (255, 0, 0), 2)
-            cv.putText(image, f"Class: {predictions[0]['labels'][i].item()}", (box[0], box[1]-10), cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1)
-            keypoints = predictions[0]['keypoints'][i].cpu().numpy()
-            for j in range(len(keypoints)):
-                kp = keypoints[j].astype(int)
-                cv.circle(image, (kp[0], kp[1]), 4, (0, 0, 255), -1)
+        boxes = predictions[0]['boxes']
+        labels = predictions[0]['labels'] 
+        keypoints = predictions[0]['keypoints']
+        keypoints_scores = predictions[0]['keypoints_scores']
+        instance_ids = predictions[0].get('instance_ids', [])
+        
+        num_predictions = len(boxes)
+        for i in range(num_predictions):
+            box = boxes[i].cpu().numpy().astype(int)
+            
+            # Get instance info if available
+            instance_id = 0  # Default to instance 0
+            if len(instance_ids) > i:
+                instance_id = instance_ids[i]
+            
+            # Use color based on instance ID
+            color = instance_colors[instance_id % len(instance_colors)]
+            
+            cv.rectangle(image, (box[0], box[1]), (box[2], box[3]), color, 2)
+            
+            # Show class and instance ID
+            class_id = labels[i].item()
+            label_text = f"Class: {class_id}, Inst: {instance_id}"
+            cv.putText(image, label_text, (box[0], box[1]-10), cv.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            
+            kpts = keypoints[i].cpu().numpy()
+            for j in range(len(kpts)):
+                kp = kpts[j].astype(int)
+                cv.circle(image, (kp[0], kp[1]), 4, color, -1)
                 # get the keypoint score on each point
-                score = predictions[0]['keypoints_scores'][i][j].item()
-                cv.putText(image, f"{score:.2f}", (kp[0], kp[1]-10), cv.FONT_HERSHEY_SIMPLEX, 0.25, (0, 0, 255), 1)
+                score = keypoints_scores[i][j].item()
+                cv.putText(image, f"{score:.2f}", (kp[0], kp[1]-10), cv.FONT_HERSHEY_SIMPLEX, 0.25, color, 1)
     
     if targets is not None:
         for i in range(len(targets['boxes'])):
@@ -791,8 +1263,34 @@ def visualizePredictions(image, predictions=None, targets=None, optical_flow_poi
                 kp = keypoints[j].astype(int)
                 cv.circle(image, (kp[0], kp[1]), 4, (0, 255, 0), -1)
 
-    # Draw optical flow points with distinct colors
-    if optical_flow_points is not None:
+    # Draw optical flow points grouped by instance with distinct colors
+    if tracking_manager is not None:
+        # Get all active tracks and group them by instance
+        active_tracks = tracking_manager.getActiveTracks()
+        instances_points = {}  # instance_id -> [(x, y, point_id), ...]
+        
+        for track_id in active_tracks:
+            try:
+                obj_idx, instance_idx, pt_idx = map(int, track_id.split('_'))
+                position = tracking_manager.getTrack(track_id).getState()
+                
+                if instance_idx not in instances_points:
+                    instances_points[instance_idx] = []
+                
+                instances_points[instance_idx].append((int(position[0]), int(position[1]), pt_idx))
+            except (ValueError, AttributeError):
+                continue
+        
+        # Draw points for each instance with different colors
+        for instance_id, points in instances_points.items():
+            color = instance_colors[instance_id % len(instance_colors)]
+            
+            for x, y, pt_idx in points:
+                cv.circle(image, (x, y), 5, color, -1)
+                cv.putText(image, f"I{instance_id}P{pt_idx}", (x+8, y), cv.FONT_HERSHEY_SIMPLEX, 0.3, color, 1)
+    
+    elif optical_flow_points is not None:
+        # Fallback to original optical flow visualization if no tracking manager
         for i, point in enumerate(optical_flow_points):
             # Handle both numpy arrays and tensors
             if hasattr(point, 'flatten'):
@@ -802,24 +1300,38 @@ def visualizePredictions(image, predictions=None, targets=None, optical_flow_poi
             cv.circle(image, (x, y), 5, color, -1)
             cv.putText(image, f"P{i}", (x+8, y), cv.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
 
-    # Add frame information with better styling
+    # Add frame information with better styling including instance count
     if frame_num is not None:
+        # Count active instances
+        instance_count = 0
+        if tracking_manager is not None:
+            active_tracks = tracking_manager.getActiveTracks()
+            instances_set = set()
+            for track_id in active_tracks:
+                try:
+                    obj_idx, instance_idx, pt_idx = map(int, track_id.split('_'))
+                    instances_set.add(instance_idx)
+                except ValueError:
+                    continue
+            instance_count = len(instances_set)
+        
         # Add black background for text readability
-        cv.rectangle(image, (5, 5), (400, 80), (0, 0, 0), -1)
-        cv.rectangle(image, (5, 5), (400, 80), (255, 255, 255), 2)
+        cv.rectangle(image, (5, 5), (450, 105), (0, 0, 0), -1)
+        cv.rectangle(image, (5, 5), (450, 105), (255, 255, 255), 2)
         
         if predictions is not None:
             cv.putText(image, f"Frame: {frame_num} (MODEL INFERENCE)", (10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
         else:
             cv.putText(image, f"Frame: {frame_num} (OPTICAL FLOW)", (10, 30), cv.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
         
-        tracked_count = len(optical_flow_points) if optical_flow_points is not None else 0
+        tracked_count = len(optical_flow_points) if optical_flow_points is not None else (len(tracking_manager.getActiveTracks()) if tracking_manager else 0)
         cv.putText(image, f"Tracked Points: {tracked_count}", (10, 55), cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+        cv.putText(image, f"Active Instances: {instance_count}", (10, 80), cv.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     
-    cv.imshow("Hybrid Keypoint Tracking", image)
+    cv.imshow("Multi-Object Hybrid Keypoint Tracking", image)
     return image
 
-def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, model_type=None, model_refresh_interval=5, frame_refresh=10, no_fpn=False, num_classes=9, num_keypoints=10, kalman_process_noise=1e-2, kalman_rcnn_noise=1e-2, kalman_optical_flow_noise=1e-4, conformal_threshold=0.08):
+def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, model_type=None, model_refresh_interval=5, frame_refresh=10, no_fpn=False, num_classes=9, num_keypoints=10, kalman_process_noise=1e-2, kalman_rcnn_noise=1e-2, kalman_optical_flow_noise=1e-4, conformal_threshold=0.08, keypoint_path=None, enable_visualization=False, NOCS_depth=False, output_name="tracking", NOCS_gt_path = None, NOCS_OBJ_ID = None):
     """
     Run hybrid tracking with model inference every N frames and optical flow in between.
 
@@ -837,11 +1349,22 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
         kalman_rcnn_noise (float): R-CNN noise for Kalman filter. Default is 1e-2.
         kalman_optical_flow_noise (float): Optical flow noise for Kalman filter. Default is 1e-4.
         conformal_threshold (float): Conformal threshold for tracking. Default is 0.08.
+        keypoint_path (str): Path to the keypoint JSON file for NOCS dataset processing. Default is None.
+        enable_visualization (bool): Whether to enable visualization display. Default is False.
+        NOCS_gt_path (str): Path to the ground truth JSON file for NOCS dataset processing. Default is None.
 
     Returns:
         list: List containing tracking errors for each dataset if using BOP dataset
     """
-
+    NOCS_scene = None
+    if data_type.lower() == 'nocs' and dataset_path is not None:
+        #NOCS_scene is the last part of the dataset path
+        NOCS_scene = os.path.basename(os.path.normpath(dataset_path))
+        print(f"NOCS scene detected: {NOCS_scene}")
+    #remove the trailing .pt from model path for display
+    model_name = os.path.basename(model_path) if model_path is not None else "No model path provided"
+    model_name = model_name.replace(".pt", "")
+    print(f"Model: {model_name}")
     # Initialize error tracking
     hallucinate_counter = 0
     device = 'cpu'
@@ -850,8 +1373,11 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
         print(f"Available data types are: nocs, bop, folder, video")
         return
     dataset = DatasetLoader(dataset_path, data_type=data_type)
+    depth_dataset = None
+    if NOCS_depth and data_type.lower() == 'nocs':
+        depth_dataset = DatasetLoader(dataset_path, data_type=data_type, depth=True, gt_path=NOCS_gt_path, scene_id=NOCS_scene)
+        print("Depth dataset loaded for NOCS depth processing.")
     num_frames_to_process = dataset.getNumFrames()
-    
     if model_type.lower() == 'kpt_rcnn':
         model = KeypointRCNN_Model(model_path=model_path, device=device, no_fpn=no_fpn, num_classes=num_classes, num_keypoints=num_keypoints)
     elif model_type.lower() == 'yolo':
@@ -898,13 +1424,18 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
         print(f"Frame refresh every {frame_refresh} frames")
     print("=== PROCESSING FRAMES ===")
     NOCS_image_path = None
-    json_data = []
+    # Multi-object data storage - separate data per object instance
+    multi_object_data = {}  # {obj_class: {instance_id: [frame_data]}}
     j = 0
     while True:
         try:
             needs_refresh = False
             start = time.time()
-            image, target, img_np = dataset.load_data(j)
+            
+            # Update frame counter for instance tracking
+            tracking_manager.updateFrameCounter()
+            
+            image, target, img_np, file_name = dataset.load_data(j)
             if image is None or img_np is None:
                 print(f"Frame {j}: No valid image found.")
                 print("Ending processing.")
@@ -931,8 +1462,9 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
                 print(f"Frame {frame_count}: Running model inference...")
                 # Run model prediction
                 kpts, p0, tracking_manager, output, mask = model.predict(image, tracking_manager=tracking_manager, img_np=img_np, mask=mask, conformal_threshold=conformal_threshold, kalman_process_noise=kalman_process_noise, kalman_rcnn_noise=kalman_rcnn_noise, kalman_optical_flow_noise=kalman_optical_flow_noise)
+                # breakpoint()
                 if output is not None:
-                    model_output = [output]
+                    model_output = output  # output is already in the correct format [{}]
                 else:
                     model_output = None
                 optical_flow_points = None if p0 is None else p0.reshape(-1, 2)
@@ -996,45 +1528,274 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
                     # No target data available
                     error_list.append(np.nan)
             # Visualize results with improved trail visualization
-            if model_output is not None:
+            img_display = None
+            if model_output is not None and enable_visualization:
                 # Model inference frame - show detections with existing trails
                 img_display = visualizePredictions(image, predictions=model_output, targets=None, 
                                     optical_flow_points=optical_flow_points, frame_num=frame_count, 
-                                    mask=mask, show_trails=True)
-            else:
+                                    mask=mask, show_trails=True, tracking_manager=tracking_manager)
+            elif enable_visualization:
                 # Optical flow frame - emphasize the tracking trails
                 img_display = visualizePredictions(img_np, predictions=None, targets=None, 
                                     optical_flow_points=optical_flow_points, frame_num=frame_count, 
-                                    mask=mask, show_trails=True)
+                                    mask=mask, show_trails=True, tracking_manager=tracking_manager)
 
             # Write frame to video output
             if img_display is not None:
                 # Resize if needed to match video writer dimensions
                 img_resized = cv.resize(img_display, (640, 480))
                 output_video.write(img_resized)
+            
+            # Handle keyboard input only if visualization is enabled
+            if enable_visualization:
+                if cv.waitKey(1) & 0xFF == ord('q'):
+                    break
 
-            cv.waitKey(1)
-
-            keypoints = np.zeros((43, 2)) # just mugs
-
-            #now go through each point and match by index of the keypoints with the model
+            # Collect keypoints per object instance
             active_tracks = tracking_manager.getActiveTracks()
-            for i, track_id in enumerate(active_tracks):
-                objid, instanceid, ptidx = map(int, track_id.split('_'))
-                keypoints[ptidx] = tracking_manager.getTrack(track_id).getState()
-
-            json_data.append({
-                "est_pixel_keypoints": keypoints.tolist(),
-                "idx": j
-            })
+            
+            # Group tracks by object class and instance
+            object_instances = {}  # {obj_class: {instance_id: {pt_idx: position}}}
+            
+            for track_id in active_tracks:
+                try:
+                    objid, instanceid, ptidx = map(int, track_id.split('_'))
+                    if objid not in object_instances:
+                        object_instances[objid] = {}
+                    if instanceid not in object_instances[objid]:
+                        object_instances[objid][instanceid] = {}
+                    
+                    position = tracking_manager.getTrack(track_id).getState()
+                    object_instances[objid][instanceid][ptidx] = position
+                except:
+                    continue
+            end = time.time()
+            elapsed = end - start
+            # Process each object instance for data collection
+            def pixel_to_world(kpts_pixel, cam_K, depth):
+                kpts_px = np.hstack([kpts_pixel, np.ones([kpts_pixel.shape[0], 1])])
+                kpts_world = depth[:, np.newaxis] * (np.linalg.inv(cam_K) @ kpts_px.T).T
+                return kpts_world
+            
+            def verify_gt_pose_matching(gt_poses, gt_names, detected_instances, camera_K):
+                """
+                Verify that GT poses are correctly matched to detected instances by comparing pixel projections.
+                
+                Args:
+                    gt_poses (list): List of GT pose matrices (4x4)
+                    gt_names (list): List of GT pose names
+                    detected_instances (dict): {instance_id: keypoints_2d} of detected instances
+                    camera_K (np.array): Camera intrinsic matrix
+                    
+                Returns:
+                    dict: {instance_id: {'gt_idx': int, 'gt_name': str, 'pixel_distance': float, 'confidence': float}}
+                """
+                if not gt_poses or not detected_instances:
+                    return {}
+                
+                verification_results = {}
+                
+                # For each detected instance, find the best GT pose match based on pixel projection
+                for instance_id, instance_keypoints in detected_instances.items():
+                    if instance_keypoints is None or len(instance_keypoints) == 0:
+                        continue
+                        
+                    # Calculate centroid of detected instance keypoints
+                    valid_keypoints = [kp for kp in instance_keypoints if not np.isnan(kp).any()]
+                    if not valid_keypoints:
+                        continue
+                    
+                    instance_centroid_2d = np.mean(valid_keypoints, axis=0)
+                    best_match = None
+                    min_pixel_distance = float('inf')
+                    
+                    # Test each GT pose
+                    for gt_idx, gt_pose in enumerate(gt_poses):
+                        try:
+                            # Extract GT translation (3D world position)
+                            gt_translation_3d = gt_pose[:3, 3]
+                            
+                            # Project GT 3D position to 2D pixel coordinates
+                            if gt_translation_3d[2] > 0:  # Valid depth
+                                # Project to pixel coordinates: pixel = K * (3D_point / z)
+                                gt_homogeneous = gt_translation_3d / gt_translation_3d[2]  # Normalize by depth
+                                gt_pixel = (camera_K @ gt_homogeneous)[:2]  # Project to 2D
+                                
+                                # Calculate distance between projected GT centroid and detected centroid
+                                pixel_distance = np.linalg.norm(gt_pixel - instance_centroid_2d)
+                                
+                                if pixel_distance < min_pixel_distance:
+                                    min_pixel_distance = pixel_distance
+                                    best_match = {
+                                        'gt_idx': gt_idx,
+                                        'gt_name': gt_names[gt_idx] if gt_idx < len(gt_names) else f"gt_{gt_idx}",
+                                        'pixel_distance': pixel_distance,
+                                        'gt_pixel_projection': gt_pixel.tolist(),
+                                        'detected_centroid': instance_centroid_2d.tolist()
+                                    }
+                                    
+                        except Exception as e:
+                            print(f"Error projecting GT pose {gt_idx}: {e}")
+                            continue
+                    
+                    if best_match and min_pixel_distance < 100.0:  # Reasonable pixel threshold
+                        confidence = max(0.0, 1.0 - (min_pixel_distance / 100.0))  # Confidence decreases with distance
+                        best_match['confidence'] = confidence
+                        verification_results[instance_id] = best_match
+                    else:
+                        print(f"Warning: No good GT pose match found for instance {instance_id} (min distance: {min_pixel_distance:.1f}px)")
+                
+                return verification_results
+            
+            # Process data for each object instance
+            # First pass: load depth data and collect all GT poses and detected instances for proper matching
+            NOCS_cam_K = np.array([[591.0125, 0, 322.525], [0, 590.16775, 244.11084], [0, 0, 1]])
+            
+            # Load depth data once per frame
+            depth = None
+            gts = None 
+            meta = None
+            if NOCS_depth and depth_dataset is not None:
+                depth, gts, meta, _ = depth_dataset.load_data(j)
+                if depth is not None:
+                    depth = depth.astype(np.float32) / 1000.0  # Convert mm to meters
+            
+            for obj_class, instances in object_instances.items():
+                # Collect all GT poses for this object class
+                gt_poses = []
+                gt_names = []
+                
+                if meta and gts is not None:
+                    with open(meta) as f:
+                        for line in f:
+                            info = line.split()
+                            try:
+                                # Match object class or use NOCS_OBJ_ID if specified
+                                obj_id_match = (NOCS_OBJ_ID is None and int(info[1]) == obj_class) or \
+                                              (NOCS_OBJ_ID is not None and int(info[1]) == NOCS_OBJ_ID)
+                                
+                                if obj_id_match:
+                                    idx = int(info[0]) - 1
+                                    if idx < len(gts):
+                                        RT_gt = gts[idx, :, :]  # 4x4
+                                        RT_gt[:,0] = RT_gt[:,0] / np.linalg.norm(RT_gt[:,0])
+                                        RT_gt[:,1] = RT_gt[:,1] / np.linalg.norm(RT_gt[:,1])
+                                        RT_gt[:,2] = RT_gt[:,2] / np.linalg.norm(RT_gt[:,2])
+                                        gt_poses.append(RT_gt)
+                                        gt_names.append(info[2] if len(info) > 2 else f"obj_{obj_class}_{len(gt_poses)-1}")
+                            except Exception as e:
+                                continue
+                
+                # Collect all detected instances for this object class (with their keypoints)
+                detected_instances_2d = {}
+                for instance_id, keypoint_dict in instances.items():
+                    # Convert sparse keypoint dict to dense array
+                    max_keypoints = 43  # Adjust based on your model
+                    keypoints = np.zeros((max_keypoints, 2))
+                    
+                    for pt_idx, position in keypoint_dict.items():
+                        if pt_idx < max_keypoints:
+                            keypoints[pt_idx] = position
+                    
+                    # Store keypoints for verification
+                    valid_keypoints = keypoints[~np.all(keypoints == 0, axis=1)]  # Remove zero-filled keypoints
+                    if len(valid_keypoints) > 0:
+                        detected_instances_2d[instance_id] = valid_keypoints
+                
+                # Perform GT pose verification/matching for this object class
+                gt_matches = {}
+                if gt_poses and detected_instances_2d:
+                    gt_matches = verify_gt_pose_matching(gt_poses, gt_names, detected_instances_2d, NOCS_cam_K)
+                    print(f"Frame {j}, Obj {obj_class}: GT pose verification results:")
+                    for inst_id, match in gt_matches.items():
+                        print(f"  Instance {inst_id} -> GT {match['gt_idx']} ({match['gt_name']}) "
+                              f"distance: {match['pixel_distance']:.1f}px, confidence: {match['confidence']:.2f}")
+                
+                # Process each instance with verified GT pose matching
+                for instance_id, keypoint_dict in instances.items():
+                    # Convert sparse keypoint dict to dense array
+                    max_keypoints = 43  # Adjust based on your model
+                    keypoints = np.zeros((max_keypoints, 2))
+                    
+                    for pt_idx, position in keypoint_dict.items():
+                        if pt_idx < max_keypoints:
+                            keypoints[pt_idx] = position
+                    
+                    # Initialize object tracking data structure
+                    if obj_class not in multi_object_data:
+                        multi_object_data[obj_class] = {}
+                    if instance_id not in multi_object_data[obj_class]:
+                        multi_object_data[obj_class][instance_id] = []
+                    
+                    # Process depth and GT data if available
+                    gt_list = None
+                    obj_name = None
+                    keypoints_d = None
+                    
+                    if depth is not None:
+                        # Get depth values for keypoints
+                        keypoints_d = keypoints.copy()
+                        keypoints_d[:, 0] = np.clip(keypoints[:, 0], 0, depth.shape[1]-1)
+                        keypoints_d[:, 1] = np.clip(keypoints[:, 1], 0, depth.shape[0]-1)
+                        
+                        depth_values = depth[keypoints_d[:, 1].astype(int), keypoints_d[:, 0].astype(int)]
+                        keypoints_d = pixel_to_world(keypoints_d, NOCS_cam_K, depth_values)
+                    
+                    # Process GT pose assignment using verification results
+                    if gt_poses and instance_id in gt_matches:
+                        # Use verified GT pose matching
+                        match = gt_matches[instance_id]
+                        gt_list = gt_poses[match['gt_idx']]
+                        obj_name = match['gt_name']
+                        
+                        print(f"  -> Instance {instance_id} assigned verified GT pose {match['gt_idx']} "
+                              f"({obj_name}) with {match['pixel_distance']:.1f}px distance")
+                              
+                    elif gt_poses:
+                        # Fallback: no verification match, try simple assignment
+                        if len(gt_poses) == 1:
+                            gt_list = gt_poses[0]
+                            obj_name = gt_names[0]
+                            print(f"  -> Instance {instance_id} using single available GT pose")
+                        elif instance_id < len(gt_poses):
+                            gt_list = gt_poses[instance_id]
+                            obj_name = gt_names[instance_id]
+                            print(f"  -> Instance {instance_id} using GT pose by index fallback")
+                        else:
+                            gt_list = gt_poses[0]
+                            obj_name = gt_names[0]
+                            print(f"  -> Instance {instance_id} using first GT pose as last resort")
+                    
+                    # Create frame data for this object instance
+                    frame_data = {
+                        "est_pixel_keypoints": keypoints.tolist(),
+                        "time": elapsed,
+                        "frame_idx": j,
+                        "obj_class": int(obj_class),
+                        "instance_id": int(instance_id)
+                    }
+                    
+                    # Add optional fields only if they exist
+                    if gt_list is not None:
+                        frame_data["gt_pose"] = gt_list.tolist()
+                    if obj_name is not None:
+                        frame_data["obj_name"] = obj_name
+                    if NOCS_scene is not None:
+                        frame_data["rgb_image_filename"] = file_name
+                    if keypoints_d is not None:
+                        frame_data["est_world_keypoints"] = keypoints_d.tolist()
+                    
+                    # Add to multi-object data
+                    multi_object_data[obj_class][instance_id].append(frame_data)
 
             # Update for next iteration
             old_gray = frame_gray.copy()
             frame_count += 1
             if tracking_manager is not None:
                 tracking_manager.step()
-
-            end = time.time()
+                # Update frame number for persistent memory management
+                tracking_manager.updateFrameNumber(frame_count)
+            
             avg_time.append(end - start)
 
             # Collect statistics only when model runs
@@ -1067,12 +1828,98 @@ def run_hybrid_tracking(model_path=None, dataset_path=None, data_type=None, mode
         print(f"Valid error measurements: {len(valid_errors)} out of {len(error_list)} frames")
         print(f"Frames without error data (NaN): {nan_count}")
     cur_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    #check if runs directory exists
+    
+    # Create runs directory
     os.makedirs('runs', exist_ok=True)
-    json_data_path = os.path.join(f'runs/{cur_time}.json')
-    with open(json_data_path, 'w') as f:
-        json.dump(json_data, f, indent=2)
-    print(f"JSON Keypoint saved to: {json_data_path}")
+    
+    # Save data for each object instance separately
+    if multi_object_data:
+        print("Saving multi-object tracking results...")
+        total_files_saved = 0
+        
+        for obj_class, instances in multi_object_data.items():
+            for instance_id, frame_data_list in instances.items():
+                if frame_data_list:  # Only save if we have data
+                    # Extract object name and scene_id for filename
+                    obj_name = None
+                    scene_id = NOCS_scene if NOCS_scene else "unknown_scene"
+                    
+                    # Find the object name from frame data
+                    for frame_data in frame_data_list:
+                        if "obj_name" in frame_data and frame_data["obj_name"]:
+                            obj_name = frame_data["obj_name"]
+                            break
+                    
+                    # Create filename using scene_id-objectname format
+                    if obj_name:
+                        # Clean object name (remove _norm suffix and other suffixes)
+                        clean_obj_name = obj_name.replace("_norm", "").replace("_test", "")
+                        filename = f'runs/{scene_id}-{clean_obj_name}.json'
+                    else:
+                        # Fallback to original naming if no object name found
+                        filename = f'runs/{output_name}_obj{obj_class}_inst{instance_id}_keypoints.json'
+                    
+                    with open(filename, 'w') as f:
+                        json.dump(frame_data_list, f, indent=2)
+                    
+                    print(f"Saved {len(frame_data_list)} frames for object {obj_class}, instance {instance_id} to: {filename}")
+                    total_files_saved += 1
+        
+        print(f"Total {total_files_saved} object instance files saved!")
+        
+        # Also save a summary file with all objects combined
+        summary_data = {
+            "metadata": {
+                "output_name": output_name,
+                "timestamp": cur_time,
+                "total_objects": len(multi_object_data),
+                "total_instances": sum(len(instances) for instances in multi_object_data.values()),
+                "total_files": total_files_saved
+            },
+            "objects": {}
+        }
+        
+        for obj_class, instances in multi_object_data.items():
+            summary_data["objects"][str(obj_class)] = {
+                "num_instances": len(instances),
+                "instances": {str(inst_id): len(frames) for inst_id, frames in instances.items()}
+            }
+        
+        summary_path = f'runs/{output_name}_summary.json'
+        with open(summary_path, 'w') as f:
+            json.dump(summary_data, f, indent=2)
+        print(f"Summary saved to: {summary_path}")
+        
+    else:
+        print("No multi-object data collected - no files saved.")
+        # Create empty summary for compatibility
+        empty_data = []
+        fallback_path = f'runs/{output_name}_keypoints.json'
+        with open(fallback_path, 'w') as f:
+            json.dump(empty_data, f, indent=2)
+        print(f"Empty fallback file saved to: {fallback_path}")
+    if data_type.lower() == 'nocs':
+        print("Processing Category Level Keypoints...")
+        cam_K = np.array([[591.0125, 0, 322.525], [0, 590.16775, 244.11084], [0, 0, 1]])
+        if keypoint_path is None:
+            print("No keypoint path provided for NOCS dataset. Skipping category-level keypoint processing.")
+        else:
+            cat_json_data = []
+            cat_kpts = dict()
+            model_path = glob.glob(os.path.join(keypoint_path, '*.csv'))
+            for obj in model_path:
+                obj_name, format = os.path.basename(obj).split('.')
+                # Read keypoints from CSV
+                kpts = np.loadtxt(obj, delimiter=',')
+                cat_kpts[obj_name] = kpts.tolist()
+            cat_json_data.append(cat_kpts)
+            cat_json_data.append({
+                "cam_K": cam_K.tolist()
+            })
+            cat_json_path = os.path.join(f'runs/{output_name}_category_keypoints.json')
+            with open(cat_json_path, 'w') as f:
+                json.dump(cat_json_data, f, indent=2)
+            print(f"Category-level keypoints saved to: {cat_json_path}")
 
     return error_list
 
@@ -1091,6 +1938,12 @@ if __name__ == "__main__":
     parser.add_argument("--kalman_rcnn_noise", type=float, default=1e-2, help="Kalman R-CNN noise.")
     parser.add_argument("--kalman_optical_flow_noise", type=float, default=1e-4, help="Kalman optical flow noise.")
     parser.add_argument("--conformal_threshold", type=float, default=0.08, help="Conformal threshold.")
+    parser.add_argument("--keypoint_path", type=str, default=None, help="Path to the keypoint JSON file for NOCS dataset.")
+    parser.add_argument("--enable_visualization", action="store_true", help="Enable visualization display.")
+    parser.add_argument("--NOCS_depth", action="store_true", help="Enable NOCS depth processing.")
+    parser.add_argument("--output_name", type=str, default="tracking", help="Output JSON file name.")
+    parser.add_argument("--NOCS_gt_path", type=str, default=None, help="Path to the ground truth JSON file for NOCS dataset.")
+    parser.add_argument("--NOCS_OBJ_ID", type=int, default=None, help="Object ID for NOCS dataset for GT pose extraction.")
     args = parser.parse_args()
 
     errors = run_hybrid_tracking(
@@ -1103,7 +1956,13 @@ if __name__ == "__main__":
         num_classes=args.num_classes,
         num_keypoints=args.num_keypoints,
         no_fpn=args.no_fpn,
-        conformal_threshold=args.conformal_threshold
+        conformal_threshold=args.conformal_threshold,
+        keypoint_path=args.keypoint_path,
+        enable_visualization=args.enable_visualization,
+        NOCS_depth=args.NOCS_depth,
+        output_name=args.output_name,
+        NOCS_gt_path=args.NOCS_gt_path,
+        NOCS_OBJ_ID=args.NOCS_OBJ_ID,
     )
     if len(errors) > 0:
         # Plot error results like in optical-flow-test.py
